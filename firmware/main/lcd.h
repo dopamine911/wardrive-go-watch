@@ -42,10 +42,13 @@ bool lcd_probe_koko(void);
 /// Marauder Mini v3 check: same pulled-up gate, then reads the ST7735's ID (3-wire on the bus's MOSI, then MISO). `stored`:
 /// the board was told it is a Mini, which stands in for an ID the panel can't give back (the gate still applies).
 bool lcd_probe_mini(bool stored);
+/// Waveshare ESP32-S3 Touch AMOLED 2.06 (ESP32-S3 only): resets the CO5300 and opens its QSPI bus. Call only once the
+/// board was identified from its board bus; false on every other chip.
+bool lcd_open_amoled(void);
 /// Splash, then the live dashboard on a low-priority task.
 void lcd_start(const char *board, const char *version, lcd_fill_fn fill);
 bool lcd_running(void);
-/// "240x320" / "128x128" while a screen runs, else "".
+/// "240x320" / "128x128" / "410x502" while a screen runs, else "".
 const char *lcd_size(void);
 /// A Wi-Fi AP sighting (Wi-Fi scan or capture): unique count, "+new" ticker, channel activity.
 void lcd_note_ap(const uint8_t *bssid, uint8_t channel);

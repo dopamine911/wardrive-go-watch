@@ -59,6 +59,9 @@
 #include "driver/rmt_tx.h"
 #include "esp_random.h"
 #endif
+#if CONFIG_IDF_TARGET_ESP32S3
+#include "driver/i2c_master.h"
+#endif
 #include "esp_rom_sys.h"
 #include "display.h"
 #include "lcd.h"
@@ -865,7 +868,7 @@ static void gps_task(void *arg) {
     if (rx >= 0) {
         ESP_LOGI(TAG, "GPS: NMEA on GPIO %d @ %d baud", rx, baud);   // gps=1 in WD:CAPS once it has a fix, as always
     } else if (board_pin_busy(CONFIG_WARDRIVEESP_GPS_RX_GPIO)) {
-        ESP_LOGI(TAG, "GPS: GPIO %d belongs to this board's battery gauge, GPS off", CONFIG_WARDRIVEESP_GPS_RX_GPIO);
+        ESP_LOGI(TAG, "GPS: GPIO %d belongs to this board's own hardware, GPS off", CONFIG_WARDRIVEESP_GPS_RX_GPIO);
         uart_driver_delete(port);
         s_gps_task = NULL;
         vTaskDelete(NULL);
@@ -2477,7 +2480,7 @@ static const char *reset_reason_name(esp_reset_reason_t r) {
 // (board_detect). Without one, no LED pin is touched. Hardware facts: docs/device-research/README.md.
 typedef enum { BOARD_NONE = 0, BOARD_CRUMB, BOARD_GHOSTBOARD, BOARD_POLTERGEIST,
                BOARD_BISCUIT_PRO, BOARD_BISCUIT_ULTRA, BOARD_BISCUIT_DUAL, BOARD_KOKO_V8,
-               BOARD_MINI_V3, BOARD_AWOK_DUAL_C5 } board_t;
+               BOARD_MINI_V3, BOARD_AWOK_DUAL_C5, BOARD_WAVESHARE_AMOLED_206 } board_t;
 typedef struct { const char *id, *name; int led_gpio, pixels; } board_def_t;
 static const board_def_t BOARDS[] = {
     [BOARD_NONE]          = { NULL, "generic", -1, 0 },
@@ -2497,6 +2500,10 @@ static const board_def_t BOARDS[] = {
     // The screen chip of an AWOK Dual C5 (its white port; the orange port's C5 has no screen and stays generic): the
     // Koko V8's ILI9341 layout on CS 23 / DC 24, but no battery gauge on 5/4.
     [BOARD_AWOK_DUAL_C5]  = { "awok_dual_c5", "AWOK Dual C5", -1, 0 },
+    // ESP32-S3 watch: AXP2101 power chip (IC type 0x4A) and its other board-bus parts on SDA 15 / SCL 14 (watch_probe),
+    // 410x502 QSPI AMOLED.
+    // The name fills s_board_caps exactly (63 characters with the id); keep it this short.
+    [BOARD_WAVESHARE_AMOLED_206] = { "waveshare_s3_amoled_206", "Waveshare AMOLED 2.06", -1, 0 },
 };
 static board_t s_board = BOARD_NONE;
 static bool board_is_awok(void) { return s_board == BOARD_AWOK_DUAL_C5; }
@@ -2818,29 +2825,8 @@ static void led_storm(void) {}
 static void cmd_led(const char *arg) { (void)arg; send_line("no LED ring on this board"); }
 #endif
 
-#if CONFIG_IDF_TARGET_ESP32C5
-// ── MAX17048 battery gauge on I2C SDA 5 / SCL 4 (the Biscuit Crumb's wiring) ──
-#define CRUMB_SDA      5
-#define CRUMB_SCL      4
-#define MAX17048_ADDR  0x36
-
+#if CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32S3
 static i2c_master_bus_handle_t s_i2c_bus;
-static i2c_master_dev_handle_t s_gauge;
-static bool s_gauge_i2c;   // the Crumb's gauge answered on 5/4 (s_has_batt can also mean a co-processor's gauge)
-
-static bool gauge_read(uint8_t reg, uint16_t *out) {
-    uint8_t v[2];
-    if (i2c_master_transmit_receive(s_gauge, &reg, 1, v, 2, 50) != ESP_OK) return false;
-    *out = (uint16_t)((v[0] << 8) | v[1]);
-    return true;
-}
-
-static void battery_read(void) {
-    uint16_t soc, vcell;
-    if (!s_gauge_i2c) return;
-    if (gauge_read(0x04, &soc)) s_batt_pct = (soc >> 8) > 100 ? 100 : (soc >> 8);   // whole percent in the high byte
-    if (gauge_read(0x02, &vcell)) s_batt_mv = (int)((uint32_t)vcell * 5 / 64);       // 78.125 µV per bit
-}
 
 // An I2C bus has both lines pulled up. A board with 4/5 free, or a GPS module on 4, reads low here against the
 // internal pull-down, so the probe never clocks a pin it doesn't own.
@@ -2863,6 +2849,31 @@ static void i2c_scan_log(int sda, int scl) {
         if (len < (int)sizeof(found) - 6 && i2c_master_probe(s_i2c_bus, a, 10) == ESP_OK)
             len += snprintf(found + len, sizeof(found) - len, " 0x%02x", a);
     ESP_LOGI(TAG, "I2C on SDA %d / SCL %d:%s", sda, scl, len ? found : " nothing answered");
+}
+
+#endif
+
+#if CONFIG_IDF_TARGET_ESP32C5
+// ── MAX17048 battery gauge on I2C SDA 5 / SCL 4 (the Biscuit Crumb's wiring) ──
+#define CRUMB_SDA      5
+#define CRUMB_SCL      4
+#define MAX17048_ADDR  0x36
+
+static i2c_master_dev_handle_t s_gauge;
+static bool s_gauge_i2c;   // the Crumb's gauge answered on 5/4 (s_has_batt can also mean a co-processor's gauge)
+
+static bool gauge_read(uint8_t reg, uint16_t *out) {
+    uint8_t v[2];
+    if (i2c_master_transmit_receive(s_gauge, &reg, 1, v, 2, 50) != ESP_OK) return false;
+    *out = (uint16_t)((v[0] << 8) | v[1]);
+    return true;
+}
+
+static void battery_read(void) {
+    uint16_t soc, vcell;
+    if (!s_gauge_i2c) return;
+    if (gauge_read(0x04, &soc)) s_batt_pct = (soc >> 8) > 100 ? 100 : (soc >> 8);   // whole percent in the high byte
+    if (gauge_read(0x02, &vcell)) s_batt_mv = (int)((uint32_t)vcell * 5 / 64);       // 78.125 µV per bit
 }
 
 #if CONFIG_WARDRIVEESP_BENCH_TOOLS
@@ -2912,10 +2923,63 @@ static bool crumb_gauge_probe(void) { return false; }
 static void battery_read(void) {}
 #endif
 
-/// A pin the board's own hardware uses, so a GPS probe must leave it alone (the Crumb's gauge bus).
+#if CONFIG_IDF_TARGET_ESP32S3
+// ── Waveshare ESP32-S3 Touch AMOLED 2.06 (the watch) ──
+// Board bus SDA 15 / SCL 14 (Waveshare BSP esp32_s3_touch_amoled_2_06.h, board_config/pin_config.h). The AXP2101 power
+// chip at 0x34 reads back its IC type (register 0x03, 0x4A: XPowersLib AXP2101Constants.h), and the rest of the bus
+// answers at boot with no pin driven: ES8311 codec 0x18 and ES7210 mic ADC 0x40 (the BSP's esp_codec_dev addresses
+// 0x30 / 0x80 in 8-bit form), PCF85063 clock 0x51 and QMI8658 motion sensor 0x6B (SensorLib). The FT3168 touch
+// controller (0x38) is not part of it: it stays silent until its reset line is pulsed (bench 2026-11-03).
+#define WATCH_SDA            15
+#define WATCH_SCL            14
+#define WATCH_I2C_HZ         400000
+#define AXP2101_ADDR         0x34
+#define AXP2101_REG_IC_TYPE  0x03
+#define AXP2101_IC_TYPE      0x4A
+static const uint8_t WATCH_PARTS[] = { 0x18, 0x40, 0x51, 0x6B };
+// Pins the watch's own hardware holds: AMOLED QSPI data 4-7, reset 8, clock 11, select 12; touch reset 9 and
+// interrupt 38; the board bus 14/15.
+static const int8_t WATCH_PINS[] = { 4, 5, 6, 7, 8, 9, 11, 12, 14, 15, 38 };
+static i2c_master_dev_handle_t s_pmic;
+static bool s_watch;
+
+/// True when the AXP2101 (by IC type) and every other part of the watch's board bus answer on 15/14. The bus and the
+/// power chip stay open.
+static bool watch_probe(void) {
+    if (!i2c_pulled_up(WATCH_SDA, WATCH_SCL)) return false;
+    i2c_master_bus_config_t bc = { .i2c_port = -1, .sda_io_num = WATCH_SDA, .scl_io_num = WATCH_SCL,
+                                   .clk_source = I2C_CLK_SRC_DEFAULT, .glitch_ignore_cnt = 7 };
+    if (i2c_new_master_bus(&bc, &s_i2c_bus) != ESP_OK) return false;
+    i2c_scan_log(WATCH_SDA, WATCH_SCL);
+    i2c_device_config_t dc = { .dev_addr_length = I2C_ADDR_BIT_LEN_7, .device_address = AXP2101_ADDR,
+                               .scl_speed_hz = WATCH_I2C_HZ };
+    uint8_t reg = AXP2101_REG_IC_TYPE, type = 0;
+    bool pmic = i2c_master_probe(s_i2c_bus, AXP2101_ADDR, 50) == ESP_OK &&
+                i2c_master_bus_add_device(s_i2c_bus, &dc, &s_pmic) == ESP_OK &&
+                i2c_master_transmit_receive(s_pmic, &reg, 1, &type, 1, 50) == ESP_OK && type == AXP2101_IC_TYPE;
+    size_t parts = 0;
+    for (size_t i = 0; pmic && i < sizeof(WATCH_PARTS); i++)
+        if (i2c_master_probe(s_i2c_bus, WATCH_PARTS[i], 50) == ESP_OK) parts++;
+    ESP_LOGI(TAG, "watch probe: AXP2101 IC type %02x, %u of %u board parts answered", type, (unsigned)parts,
+             (unsigned)sizeof(WATCH_PARTS));
+    if (pmic && parts == sizeof(WATCH_PARTS)) return true;
+    if (s_pmic) { i2c_master_bus_rm_device(s_pmic); s_pmic = NULL; }
+    i2c_del_master_bus(s_i2c_bus);
+    s_i2c_bus = NULL;
+    gpio_reset_pin(WATCH_SDA);
+    gpio_reset_pin(WATCH_SCL);
+    return false;
+}
+#endif
+
+/// A pin the board's own hardware uses, so a GPS probe must leave it alone (the Crumb's gauge bus, the watch's screen).
 static bool board_pin_busy(int gpio) {
 #if CONFIG_IDF_TARGET_ESP32C5
     if (s_gauge_i2c && (gpio == CRUMB_SDA || gpio == CRUMB_SCL)) return true;
+#endif
+#if CONFIG_IDF_TARGET_ESP32S3
+    if (s_watch)
+        for (size_t i = 0; i < sizeof(WATCH_PINS); i++) if (WATCH_PINS[i] == gpio) return true;
 #endif
     return gpio < 0;
 }
@@ -3020,6 +3084,9 @@ static board_t board_detect(void) {
     if (s_has_lcd) return BOARD_AWOK_DUAL_C5;
     if (s_has_disp && flash_physical_mb() == 16) return BOARD_POLTERGEIST;   // SSD1306 on 0/1, 16 MB, no gauge on 5/4
 #endif
+#if CONFIG_IDF_TARGET_ESP32S3
+    if (s_watch) return BOARD_WAVESHARE_AMOLED_206;
+#endif
     return BOARD_NONE;
 }
 
@@ -3080,7 +3147,7 @@ static void sdx_deleted(const char *name) {
     else s_sdx.t_last = sdx_now();   // the next run's reads come shortly
 }
 
-#if CONFIG_IDF_TARGET_ESP32C5
+#if CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32S3
 // What the transfer screen shows (lcd_fill): only while a host holds the board.
 static void sdx_fill(lcd_status_t *st) {
     uint32_t now = sdx_now(), last = s_sdx.t_last, sent = s_sdx.sent_at;
@@ -3116,6 +3183,7 @@ static void sdx_fill(lcd_status_t *st) {
         } \
     } while (0)
 
+#if CONFIG_IDF_TARGET_ESP32C5
 // What the Poltergeist's screen shows, a few times a second.
 static void display_fill(display_status_t *st) {
     st->channel = s_crumb_ch;
@@ -3130,8 +3198,9 @@ static void display_fill(display_status_t *st) {
     st->aps_session = apc_session();
     OTA_FILL(st);
 }
+#endif
 
-// What the Koko V8's screen shows, a few times a second.
+// What the color screens (Koko V8, Mini v3, AWOK, the watch) show, a few times a second.
 static void lcd_fill(lcd_status_t *st) {
     st->channel = s_crumb_ch;
     const char *m = role_name(s_role);
@@ -3166,6 +3235,9 @@ static void board_init(void) {
     heap_check("boot: before gauge probe");
     (void)crumb_gauge_probe();   // battery level and the I2C scan, whatever the board turns out to be
     heap_check("boot: after gauge probe");
+#if CONFIG_IDF_TARGET_ESP32S3
+    s_watch = watch_probe();
+#endif
 #if CONFIG_IDF_TARGET_ESP32C5
     s_has_disp = !s_gauge_i2c && display_probe(POLT_SDA, POLT_SCL);
     s_has_lcd = s_gauge_i2c && lcd_probe_koko();
@@ -3208,6 +3280,9 @@ static void board_init(void) {
             nvs_close(h);
         }
     }
+#endif
+#if CONFIG_IDF_TARGET_ESP32S3
+    if (s_board == BOARD_WAVESHARE_AMOLED_206 && lcd_open_amoled()) lcd_start(b->name, FW_VERSION, lcd_fill);
 #endif
     heap_check("boot: after LED start");
 }
@@ -4435,7 +4510,7 @@ static void ext_build(void) {
     if (s_cp_present && s_cp_scan) cp = !strcmp(s_cp_mode, "btc") ? 2 : !strcmp(s_cp_mode, "wifi") ? 3 : 1;
 #endif
     bool screen = s_board == BOARD_KOKO_V8 || s_board == BOARD_MINI_V3 || s_board == BOARD_AWOK_DUAL_C5 ||
-                  s_board == BOARD_POLTERGEIST;
+                  s_board == BOARD_POLTERGEIST || s_board == BOARD_WAVESHARE_AMOLED_206;
     uint8_t *b = s_ext + 2;
     memset(b, 0, 6);
     s_ext[0] = EXT_UUID16 & 0xFF; s_ext[1] = EXT_UUID16 >> 8;

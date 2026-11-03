@@ -1,6 +1,7 @@
-// WardriveESP — color status screens over SPI: the Koko Marauder V8's 240x320 ILI9341 and the Marauder Mini v3's
-// 128x128 ST7735. Boot splash, live dashboard, alerts (scenes in lcd_draw.c). Drawn in 16-row strips into one small DMA
-// buffer; a strip goes to the panel only when its pixels changed.
+// WardriveESP — color status screens: the Koko Marauder V8's 240x320 ILI9341 and the Marauder Mini v3's 128x128 ST7735
+// over SPI, and the Waveshare ESP32-S3 Touch AMOLED 2.06's 410x502 CO5300 over QSPI. Boot splash, live dashboard,
+// alerts (scenes in lcd_draw.c). Drawn in 16-row strips into one small DMA buffer; a strip goes to the panel only when
+// its pixels changed.
 // SPDX-License-Identifier: MIT
 
 #include <stdio.h>
@@ -20,6 +21,10 @@
 #include "esp_timer.h"
 #include "lcd.h"
 #include "lcd_draw.h"
+#if CONFIG_IDF_TARGET_ESP32S3
+#include "esp_lcd_io_spi.h"
+#include "esp_lcd_panel_io.h"
+#endif
 
 static const char *TAG = "WardriveESP";
 
@@ -93,17 +98,65 @@ __attribute__((unused)) static const init_t INIT_ST7735[] = {
 
 typedef struct {
     const char *name;
-    int w, h, xofs, yofs;                 // panel size and where it sits in the controller's memory
-    int bl;                               // backlight GPIO
+    int w, h, xofs, yofs;                 // drawn size and where it sits in the controller's memory
+    int bl;                               // backlight GPIO, -1: brightness is the panel's own (DCS 51h, AMOLED)
     bool bl_low;                          // backlight on when the pin is low
     const init_t *init;
     size_t n_init;
+    bool qspi;                            // QSPI panel: commands and pixels framed by esp_lcd's QSPI panel IO, no D/C pin
 } panel_t;
 
 __attribute__((unused)) static const panel_t KOKO = { "240x320 ILI9341", 240, 320, 0, 0, 8, false, INIT_ILI9341,
-                              sizeof(INIT_ILI9341) / sizeof(INIT_ILI9341[0]) };
+                              sizeof(INIT_ILI9341) / sizeof(INIT_ILI9341[0]), false };
 __attribute__((unused)) static const panel_t MINI = { "128x128 ST7735", 128, 128, 2, 3, 5, true, INIT_ST7735,
-                              sizeof(INIT_ST7735) / sizeof(INIT_ST7735[0]) };
+                              sizeof(INIT_ST7735) / sizeof(INIT_ST7735[0]), false };
+
+#if CONFIG_IDF_TARGET_ESP32S3
+// Waveshare ESP32-S3 Touch AMOLED 2.06: CO5300 AMOLED, 410x502, QSPI on SPI2 (Waveshare BSP esp32_s3_touch_amoled_2_06.h
+// and board_config/pin_config.h). Columns start 22 into the controller's memory (esp_lcd_panel_set_gap(panel, 0x16, 0)).
+#define AM_PIN_SCLK   11
+#define AM_PIN_CS     12
+#define AM_PIN_D0     4
+#define AM_PIN_D1     5
+#define AM_PIN_D2     6
+#define AM_PIN_D3     7
+#define AM_PIN_RST    8
+#define AM_HOST       SPI2_HOST
+#define AM_CLK_HZ     (40 * 1000 * 1000)   // esp_lcd_sh8601 2.0.0 SH8601_PANEL_IO_QSPI_CONFIG
+#define AM_W          410
+#define AM_H          502
+#define AM_XGAP       22
+#define AM_CLEAR_ROWS 8                    // rows per blanking write: 410 x 8 x 2 bytes fits the 240 x 16 strip buffer
+// QSPI framing (esp_lcd_sh8601.c): a register write is opcode 02h then 00 <cmd> 00 on one line; pixels are opcode 32h
+// then 00 2Ch 00, the data on four lines.
+#define AM_OP_CMD     0x02u
+#define AM_OP_PIXELS  0x32u
+// Every window the CO5300 takes starts on an even column and row and spans an even count (the BSP's LVGL rounder).
+// The 240x320 dashboard sits centered, one pixel left and up so both offsets stay even.
+#define AM_SCENE_X    (AM_XGAP + ((AM_W - 240) / 2 & ~1))
+#define AM_SCENE_Y    ((AM_H - 320) / 2 & ~1)
+
+// Power-up: the reset pin first (lcd_open_amoled), then MADCTL RGB and 16-bit color (what esp_lcd_sh8601 sends before a
+// vendor table), then Waveshare's table (BSP lcd_init_cmds) with brightness 0. Display on (29h) comes in lcd_start once
+// the splash is in the panel's memory, so the AMOLED never shows what the reset left there.
+static const init_t INIT_CO5300[] = {
+    { 0x36, 1, { 0x00 }, 0 },                     // MADCTL: RGB
+    { 0x3A, 1, { 0x55 }, 0 },                     // 16 bits per pixel
+    { 0x11, 0, {0}, 120 },                        // sleep out
+    { 0xC4, 1, { 0x80 }, 0 },
+    { 0x44, 2, { 0x01, 0xD1 }, 0 },
+    { 0x35, 1, { 0x00 }, 0 },                     // tearing-effect line on
+    { 0x53, 1, { 0x20 }, 10 },                    // brightness control on
+    { 0x63, 1, { 0xFF }, 10 },
+    { 0x51, 1, { 0x00 }, 10 },                    // brightness 0 until the first frame is in
+    { 0x2A, 4, { 0x00, AM_XGAP, (AM_XGAP + AM_W - 1) >> 8, (AM_XGAP + AM_W - 1) & 0xFF }, 0 },
+    { 0x2B, 4, { 0x00, 0x00, (AM_H - 1) >> 8, (AM_H - 1) & 0xFF }, 0 },
+};
+static const panel_t AMOLED = { "410x502 CO5300", 240, 320, AM_SCENE_X, AM_SCENE_Y, -1, false, INIT_CO5300,
+                                sizeof(INIT_CO5300) / sizeof(INIT_CO5300[0]), true };
+static esp_lcd_panel_io_handle_t s_io;
+static SemaphoreHandle_t s_io_done;   // the pixels of the last strip are out: the strip buffer can be drawn again
+#endif
 
 static const panel_t *s_panel;
 static spi_device_handle_t s_dev;
@@ -129,14 +182,39 @@ static uint32_t s_session_at[10];   // session count at the start of each of the
 
 static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 
-// ── SPI ──
+// ── SPI / QSPI ──
+#if CONFIG_IDF_TARGET_ESP32S3
+#define AM_DONE_MS 100   // one strip is ~8 KB, under a millisecond at 40 MHz on four lines
+
+static bool IRAM_ATTR am_done(esp_lcd_panel_io_handle_t io, esp_lcd_panel_io_event_data_t *ev, void *ctx) {
+    (void)io; (void)ev; (void)ctx;
+    BaseType_t woken = pdFALSE;
+    xSemaphoreGiveFromISR(s_io_done, &woken);
+    return woken == pdTRUE;
+}
+
+// The pixels go out by DMA after esp_lcd queues them: wait, so the strip buffer isn't drawn over mid-transfer.
+static esp_err_t am_pixels(const void *buf, size_t n) {
+    esp_err_t e = esp_lcd_panel_io_tx_color(s_io, (int)(AM_OP_PIXELS << 24 | 0x2Cu << 8), buf, n);
+    if (e == ESP_OK && xSemaphoreTake(s_io_done, pdMS_TO_TICKS(AM_DONE_MS)) != pdTRUE) e = ESP_ERR_TIMEOUT;
+    return e;
+}
+#endif
+
+// Pixels (`data`) or a command byte. On QSPI only pixels come through here: cmd() frames its own.
 static esp_err_t send(bool data, const void *buf, size_t n) {
     if (!n) return ESP_OK;
+#if CONFIG_IDF_TARGET_ESP32S3
+    if (s_panel->qspi) return am_pixels(buf, n);
+#endif
     gpio_set_level(PIN_DC, data);
     spi_transaction_t t = { .length = n * 8, .tx_buffer = buf };
     return spi_device_polling_transmit(s_dev, &t);
 }
 static esp_err_t cmd(uint8_t c, const uint8_t *p, size_t n) {
+#if CONFIG_IDF_TARGET_ESP32S3
+    if (s_panel->qspi) return esp_lcd_panel_io_tx_param(s_io, (int)(AM_OP_CMD << 24 | (uint32_t)c << 8), p, n);
+#endif
     esp_err_t e = send(false, &c, 1);
     return e == ESP_OK ? send(true, p, n) : e;
 }
@@ -282,6 +360,43 @@ bool lcd_probe_mini(bool stored) {
 #endif
 }
 
+// Waveshare ESP32-S3 Touch AMOLED 2.06: only called once the board was identified (its AXP2101 and touch controller
+// answered on the board bus), so these pins are known to be the panel's. Reset, QSPI bus, esp_lcd panel IO.
+bool lcd_open_amoled(void) {
+#if !CONFIG_IDF_TARGET_ESP32S3
+    return false;
+#else
+    if (s_io) return true;
+    s_io_done = xSemaphoreCreateBinary();
+    if (!s_io_done) return false;
+    gpio_config_t rst = { .pin_bit_mask = 1ULL << AM_PIN_RST, .mode = GPIO_MODE_OUTPUT };
+    gpio_config(&rst);
+    gpio_set_level(AM_PIN_RST, 0);   // esp_lcd_sh8601 panel_sh8601_reset: 10 ms low, 150 ms to come up
+    vTaskDelay(pdMS_TO_TICKS(10));
+    gpio_set_level(AM_PIN_RST, 1);
+    vTaskDelay(pdMS_TO_TICKS(150));
+    spi_bus_config_t bc = { .sclk_io_num = AM_PIN_SCLK, .data0_io_num = AM_PIN_D0, .data1_io_num = AM_PIN_D1,
+                            .data2_io_num = AM_PIN_D2, .data3_io_num = AM_PIN_D3, .max_transfer_sz = LCD_W * SH * 2 };
+    esp_err_t e = spi_bus_initialize(AM_HOST, &bc, SPI_DMA_CH_AUTO);
+    if (e == ESP_OK) {
+        esp_lcd_panel_io_spi_config_t ic = { .cs_gpio_num = AM_PIN_CS, .dc_gpio_num = -1, .spi_mode = 0,
+                                             .pclk_hz = AM_CLK_HZ, .trans_queue_depth = 2, .on_color_trans_done = am_done,
+                                             .lcd_cmd_bits = 32, .lcd_param_bits = 8, .flags = { .quad_mode = 1 } };
+        e = esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)AM_HOST, &ic, &s_io);
+        if (e != ESP_OK) spi_bus_free(AM_HOST);
+    }
+    if (e != ESP_OK) {
+        ESP_LOGW(TAG, "amoled: QSPI bus failed (%s)", esp_err_to_name(e));
+        vSemaphoreDelete(s_io_done);
+        s_io_done = NULL;
+        s_io = NULL;
+        return false;
+    }
+    s_panel = &AMOLED;
+    return true;
+#endif
+}
+
 // ── AP sightings ──
 void lcd_note_ap(const uint8_t *bssid, uint8_t channel) {
     (void)bssid;
@@ -298,7 +413,7 @@ static void window(int y0, int y1) {
     const uint8_t ra[] = { (uint8_t)(y0 >> 8), (uint8_t)y0, (uint8_t)(y1 >> 8), (uint8_t)y1 };
     cmd(0x2A, ca, 4);
     cmd(0x2B, ra, 4);
-    cmd(0x2C, NULL, 0);
+    if (!s_panel->qspi) cmd(0x2C, NULL, 0);   // QSPI: the pixel write carries RAMWR itself
 }
 
 // `lock`: take the bus for each changed strip only, so the microSD card (an offline run, or the app reading runs off it)
@@ -343,10 +458,33 @@ static void gather(lcd_frame_t *f, uint32_t now) {
     f->version = s_version;
 }
 
+// Backlight PWM, or on an AMOLED (no backlight pin) the panel's own brightness, 0-255 either way.
 static void backlight(int duty) {
+    if (s_panel->bl < 0) {
+        const uint8_t v = (uint8_t)duty;
+        lcd_bus_lock();
+        cmd(0x51, &v, 1);
+        lcd_bus_unlock();
+        return;
+    }
     ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, (uint32_t)duty);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1);
 }
+
+#if CONFIG_IDF_TARGET_ESP32S3
+// The reset leaves noise in the AMOLED's memory and the dashboard covers only the middle: black the whole panel once.
+static void am_clear(void) {
+    memset(s_strip, 0, (size_t)AM_W * AM_CLEAR_ROWS * 2);
+    const uint8_t ca[] = { 0x00, AM_XGAP, (AM_XGAP + AM_W - 1) >> 8, (AM_XGAP + AM_W - 1) & 0xFF };
+    cmd(0x2A, ca, 4);
+    for (int y = 0; y < AM_H; y += AM_CLEAR_ROWS) {
+        int rows = AM_H - y < AM_CLEAR_ROWS ? AM_H - y : AM_CLEAR_ROWS;
+        const uint8_t ra[] = { (uint8_t)(y >> 8), (uint8_t)y, (uint8_t)((y + rows - 1) >> 8), (uint8_t)(y + rows - 1) };
+        cmd(0x2B, ra, 4);
+        send(true, s_strip, (size_t)AM_W * rows * 2);
+    }
+}
+#endif
 
 static void lcd_task(void *arg) {
     (void)arg;
@@ -383,7 +521,7 @@ static void lcd_task(void *arg) {
 }
 
 void lcd_start(const char *board, const char *version, lcd_fill_fn fill_fn) {
-    if (!s_dev || !s_panel || s_task) return;
+    if (!s_panel || s_task || (!s_panel->qspi && !s_dev)) return;
     s_strip = heap_caps_malloc((size_t)s_panel->w * SH * 2, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
     if (!s_strip) {
         ESP_LOGW(TAG, "lcd: no memory");
@@ -392,11 +530,13 @@ void lcd_start(const char *board, const char *version, lcd_fill_fn fill_fn) {
     s_board = board; s_version = version; s_fill = fill_fn;
     if (!s_bus_lock) s_bus_lock = xSemaphoreCreateMutex();
 
-    ledc_timer_config_t tc = { .speed_mode = LEDC_LOW_SPEED_MODE, .duty_resolution = LEDC_TIMER_8_BIT,
-                               .timer_num = LEDC_TIMER_1, .freq_hz = 5000, .clk_cfg = LEDC_AUTO_CLK };
-    ledc_channel_config_t cc = { .gpio_num = s_panel->bl, .speed_mode = LEDC_LOW_SPEED_MODE, .channel = LEDC_CHANNEL_1,
-                                 .timer_sel = LEDC_TIMER_1, .duty = 0, .flags.output_invert = s_panel->bl_low };
-    if (ledc_timer_config(&tc) != ESP_OK || ledc_channel_config(&cc) != ESP_OK) ESP_LOGW(TAG, "lcd: backlight PWM failed");
+    if (s_panel->bl >= 0) {
+        ledc_timer_config_t tc = { .speed_mode = LEDC_LOW_SPEED_MODE, .duty_resolution = LEDC_TIMER_8_BIT,
+                                   .timer_num = LEDC_TIMER_1, .freq_hz = 5000, .clk_cfg = LEDC_AUTO_CLK };
+        ledc_channel_config_t cc = { .gpio_num = s_panel->bl, .speed_mode = LEDC_LOW_SPEED_MODE, .channel = LEDC_CHANNEL_1,
+                                     .timer_sel = LEDC_TIMER_1, .duty = 0, .flags.output_invert = s_panel->bl_low };
+        if (ledc_timer_config(&tc) != ESP_OK || ledc_channel_config(&cc) != ESP_OK) ESP_LOGW(TAG, "lcd: backlight PWM failed");
+    }
 
     lcd_bus_lock();
     for (size_t i = 0; i < s_panel->n_init; i++) {
@@ -404,6 +544,9 @@ void lcd_start(const char *board, const char *version, lcd_fill_fn fill_fn) {
         if (cmd(in->c, in->p, in->n) != ESP_OK) { lcd_bus_unlock(); ESP_LOGW(TAG, "lcd didn't take its setup"); return; }
         if (in->ms) vTaskDelay(pdMS_TO_TICKS(in->ms));
     }
+#if CONFIG_IDF_TARGET_ESP32S3
+    if (s_panel->qspi) am_clear();
+#endif
     s_t0 = now_ms();
     lcd_frame_t f;
     gather(&f, s_t0);
@@ -427,7 +570,9 @@ bool lcd_sd_slot(int *host, int *cs) {
 
 void lcd_bus_lock(void) { if (s_bus_lock) xSemaphoreTake(s_bus_lock, portMAX_DELAY); }
 void lcd_bus_unlock(void) { if (s_bus_lock) xSemaphoreGive(s_bus_lock); }
-const char *lcd_size(void) { return !s_task ? "" : s_panel == &MINI ? "128x128" : "240x320"; }
+const char *lcd_size(void) {
+    return !s_task ? "" : s_panel->qspi ? "410x502" : s_panel == &MINI ? "128x128" : "240x320";
+}
 
 void lcd_alert(const char *label, uint32_t ms, bool soft, uint32_t rgb, bool police) {
     if (!s_task) return;
