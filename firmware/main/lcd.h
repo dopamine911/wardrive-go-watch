@@ -57,6 +57,11 @@ void lcd_note_ap(const uint8_t *bssid, uint8_t channel);
 void lcd_alert(const char *label, uint32_t ms, bool soft, uint32_t rgb, bool police);
 /// Stealth: panel and backlight off.
 void lcd_set_stealth(bool on);
+/// A touch screen: true while a finger is down, with its panel coordinates. Polled once a frame by the screen task.
+typedef bool (*lcd_touch_fn)(int *x, int *y);
+/// Hand the screen its touch input (the watch). With one set, the panel goes dark after 30 s without a touch and comes
+/// back on the next touch or alert; the scan and Bluetooth carry on either way.
+void lcd_set_touch(lcd_touch_fn fn);
 /// The bus's microSD slot, once the ILI9341 screen runs and the slot's chip select read pulled up (Koko V8, AWOK Dual
 /// C5): its SPI host and chip select. False on every other board.
 bool lcd_sd_slot(int *host, int *cs);

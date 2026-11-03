@@ -43,8 +43,8 @@ Nothing here comes from a simulator, and there are no automated tests yet.
   `0x18 0x34 0x40 0x51 0x6b`, with 0x38 silent, and the watch came up as `generic`. The fingerprint now uses the
   AXP2101 chip type plus the four parts that do answer (analysis §7 D1, revised). Touch input will need a reset
   pulse on GPIO 9 after identification.
-- **Wardrive Go sends alerts to the watch.** HW-LOG: `cmd: 'led alert spin FFD23B 6 TRACKER'`. On S3 `cmd_led` is
-  still the upstream stub, so the watch replies "no LED ring" and shows no banner. This settles analysis R3.
+- **Wardrive Go sends alerts to the watch.** HW-LOG: `cmd: 'led alert spin FFD23B 6 TRACKER'`. At slice 1, `cmd_led`
+  on S3 was still the upstream stub, so no banner showed. Fixed in Phase 2–3 (#17). This settles analysis R3.
 - **Opening the serial port resets the watch** unless RTS drops before DTR. A reset drops the phone link. Use
   `idf.py monitor --no-reset` (checked: uptime 495 s → 505 s with no reset).
 
@@ -55,6 +55,23 @@ Nothing here comes from a simulator, and there are no automated tests yet.
 | O1 | One screen freeze plus the watch dropping off USB | **not reproduced** | HW-EYE: dashboard frozen at clock 0:04 (about 6 s after boot) and the watch absent from `lsusb` while plugged in. It recovered after the app was foregrounded and the cable replugged. This happened right after a log capture that reset the watch and then closed the port. The freeze did not recur with the app backgrounded for 60 s (#11). The kernel log is unreadable (user not in `adm`). INFER: tied to the bench reset or port close, not to the firmware's normal running. Not proven. |
 | O2 | Screen setup holds up boot for about 1.4 s before Wi-Fi starts | known | HW-LOG: `board:` at 564 ms, `lcd … running` at 1934 ms. Same synchronous pattern as the upstream color screens |
 | O3 | Dashboard is the 240×320 layout, centred | by design for slice 1 | The native 410×502 layout is Phase 4 |
-| O4 | Battery, touch, phone alerts on screen, screen sleep, brightness controls | not started | Phases 2–4 |
+| O4 | Screen brightness and timeout controls, on-watch scan start/stop | not started | Phase 4 (controls screen) |
+| O7 | Screen sleep doesn't wake for an incoming firmware update | known | While dark the screen task doesn't gather state, so the OTA progress screen first shows on the next touch or alert. The update itself is unaffected |
+| O8 | Battery charge state not shown | by design (D3) | The AXP2101 reports charging (`0x01` bits 7–5), but no existing `WD:` key or dashboard field carries it |
 | O5 | Sustained soak (≥30 min concurrent scan and render) | not run | acceptance check 6 in the analysis |
 | O6 | esp32c5 can't be built with the local IDF | upstream/toolchain | #3; needs the IDF release upstream uses |
+
+## Phase 2–3: battery, phone alerts, touch, screen sleep (2026-11-03)
+
+Same watch, phone and toolchain as slice 1. Firmware: slice 1 plus this change.
+
+| # | Check | Result | Evidence |
+|---|---|---|---|
+| 13 | esp32s3 builds | pass | BUILD: exit 0; same known warnings; 0x12ac10 bytes, 38 % of the slot free (the ring driver now links on S3, ~30 KB) |
+| 14 | esp32c3, esp32c6, esp32c5 (CSI line removed) | pass | BUILD: exit 0, warnings unchanged; C3/C6 sizes unchanged, C5 +0x1B0 |
+| 15 | Battery read | pass | HW-LOG: `battery AXP2101: 100%, 4114 mV (ADC ctrl 01 -> 01)`. The setup write is a no-op on this unit's defaults. Not checked against a meter |
+| 16 | Battery in the existing protocol | pass | HW-LOG (USB session): `WD:CAPS … batt=1 …`, `WD:HEALTH … batt=100 batt_mv=4113 …`. The advert extras carry it through the existing battery byte (INFER: same `s_batt_pct` source, not captured over the air) |
+| 17 | Phone alert shows on the watch | pass | HW-LOG: `led alert spin 00C8FF 6 DRONE` sent over USB, reply `led spin 00c8ff 6s`. HW-EYE: DRONE banner flashed about 6 s, then the dashboard returned. The app's `led alert …` over BLE runs the same `cmd_led` |
+| 18 | Touch controller | pass | HW-LOG: `touch FT3x68: ready (id 03)` after the reset pulse (0x03 = FT3168 per Arduino_FT3x68.h) |
+| 19 | Screen sleep and wake on touch | pass | HW-LOG: `screen off (no touch for 30 s)` at 34.2 s, `screen on (touch at 153,466)` at 73.6 s. HW-EYE: went dark, a tap woke it |
+| 20 | Scanning and BLE keep going with the screen off | pass | HW-LOG: 86 BLE notifications in the 39.4 s dark vs 99 in 42.6 s lit (about 2.2/s both) |

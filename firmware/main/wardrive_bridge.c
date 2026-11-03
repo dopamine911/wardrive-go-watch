@@ -54,13 +54,10 @@
 #include "driver/gpio.h"
 #include "esp_private/esp_gpio_reserve.h"
 #include "soc/uart_pins.h"
-#if CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32C6
+#if CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32C6 || CONFIG_IDF_TARGET_ESP32S3
 #include "driver/i2c_master.h"
 #include "driver/rmt_tx.h"
 #include "esp_random.h"
-#endif
-#if CONFIG_IDF_TARGET_ESP32S3
-#include "driver/i2c_master.h"
 #endif
 #include "esp_rom_sys.h"
 #include "display.h"
@@ -2513,7 +2510,9 @@ static bool board_gps14(void) {   // GPS on GPIO 14 (GhostESP / Marauder configs
 static volatile int s_batt_pct = -1;    // state of charge, -1 = unknown
 static volatile int s_batt_mv = 0;
 
-#if CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32C6
+// ESP32-S3: no S3 board has a ring yet, but the watch's screen takes the app's alerts through cmd_led (the ring itself
+// never starts: its BOARDS entry has no pixels).
+#if CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32C6 || CONFIG_IDF_TARGET_ESP32S3
 #define LED_MAX 6
 
 // ── LED ring: 800 kHz WS2812 (40 MHz ticks: one = 28 high / 20 low, zero = 10 / 38), GRB ──
@@ -2920,7 +2919,9 @@ static bool crumb_gauge_probe(void) {
 }
 #else
 static bool crumb_gauge_probe(void) { return false; }
+#if !CONFIG_IDF_TARGET_ESP32S3   // the watch reads its AXP2101 (watch_battery_init)
 static void battery_read(void) {}
+#endif
 #endif
 
 #if CONFIG_IDF_TARGET_ESP32S3
@@ -2936,12 +2937,26 @@ static void battery_read(void) {}
 #define AXP2101_ADDR         0x34
 #define AXP2101_REG_IC_TYPE  0x03
 #define AXP2101_IC_TYPE      0x4A
+// Battery registers (XPowersLib XPowersAXP2101.tpp: isBatteryConnect, enableBattVoltageMeasure, disableTSPinMeasure,
+// getBattVoltage, getBatteryPercent).
+#define AXP2101_REG_STATUS1  0x00   // bit 3: a battery is connected
+#define AXP2101_BAT_PRESENT  0x08
+#define AXP2101_REG_ADC_CTRL 0x30   // bit 0: battery voltage ADC; bit 1: TS pin (NTC) measurement
+#define AXP2101_ADC_VBAT     0x01
+#define AXP2101_ADC_TS       0x02
+#define AXP2101_REG_VBAT_H   0x34   // battery mV: low 5 bits here, then 8 bits in 0x35
+#define AXP2101_REG_VBAT_L   0x35
+#define AXP2101_REG_BAT_PCT  0xA4   // state of charge, percent
 static const uint8_t WATCH_PARTS[] = { 0x18, 0x40, 0x51, 0x6B };
 // Pins the watch's own hardware holds: AMOLED QSPI data 4-7, reset 8, clock 11, select 12; touch reset 9 and
 // interrupt 38; the board bus 14/15.
 static const int8_t WATCH_PINS[] = { 4, 5, 6, 7, 8, 9, 11, 12, 14, 15, 38 };
 static i2c_master_dev_handle_t s_pmic;
 static bool s_watch;
+
+static bool pmic_read(uint8_t reg, uint8_t *v) {
+    return i2c_master_transmit_receive(s_pmic, &reg, 1, v, 1, 50) == ESP_OK;
+}
 
 /// True when the AXP2101 (by IC type) and every other part of the watch's board bus answer on 15/14. The bus and the
 /// power chip stay open.
@@ -2953,10 +2968,10 @@ static bool watch_probe(void) {
     i2c_scan_log(WATCH_SDA, WATCH_SCL);
     i2c_device_config_t dc = { .dev_addr_length = I2C_ADDR_BIT_LEN_7, .device_address = AXP2101_ADDR,
                                .scl_speed_hz = WATCH_I2C_HZ };
-    uint8_t reg = AXP2101_REG_IC_TYPE, type = 0;
+    uint8_t type = 0;
     bool pmic = i2c_master_probe(s_i2c_bus, AXP2101_ADDR, 50) == ESP_OK &&
                 i2c_master_bus_add_device(s_i2c_bus, &dc, &s_pmic) == ESP_OK &&
-                i2c_master_transmit_receive(s_pmic, &reg, 1, &type, 1, 50) == ESP_OK && type == AXP2101_IC_TYPE;
+                pmic_read(AXP2101_REG_IC_TYPE, &type) && type == AXP2101_IC_TYPE;
     size_t parts = 0;
     for (size_t i = 0; pmic && i < sizeof(WATCH_PARTS); i++)
         if (i2c_master_probe(s_i2c_bus, WATCH_PARTS[i], 50) == ESP_OK) parts++;
@@ -2969,6 +2984,71 @@ static bool watch_probe(void) {
     gpio_reset_pin(WATCH_SDA);
     gpio_reset_pin(WATCH_SCL);
     return false;
+}
+
+/// Battery level and voltage from the AXP2101 (health_task, every 30 s). Unknown while no battery is connected.
+static void battery_read(void) {
+    uint8_t st = 0, pct = 0, h = 0, l = 0;
+    if (!s_pmic || !pmic_read(AXP2101_REG_STATUS1, &st)) return;
+    if (!(st & AXP2101_BAT_PRESENT)) { s_batt_pct = -1; s_batt_mv = 0; return; }
+    if (pmic_read(AXP2101_REG_BAT_PCT, &pct)) s_batt_pct = pct > 100 ? 100 : pct;
+    if (pmic_read(AXP2101_REG_VBAT_H, &h) && pmic_read(AXP2101_REG_VBAT_L, &l)) s_batt_mv = ((h & 0x1F) << 8) | l;
+}
+
+/// Battery voltage ADC on, TS pin measurement off: the watch has no NTC on TS, and Waveshare's own setup turns it off
+/// because it otherwise upsets charging (01_AXP2101 port_axp2101.cpp:112-114; XPowersLib begin() does the same).
+static void watch_battery_init(void) {
+    uint8_t reg = AXP2101_REG_ADC_CTRL, v = 0;
+    if (!pmic_read(reg, &v)) { ESP_LOGW(TAG, "watch: power chip ADC unreadable, no battery level"); return; }
+    uint8_t w[2] = { reg, (uint8_t)((v | AXP2101_ADC_VBAT) & ~AXP2101_ADC_TS) };
+    if (i2c_master_transmit(s_pmic, w, sizeof(w), 50) != ESP_OK) { ESP_LOGW(TAG, "watch: power chip ADC setup failed"); return; }
+    s_has_batt = true;
+    battery_read();
+    ESP_LOGI(TAG, "battery AXP2101: %d%%, %d mV (ADC ctrl %02x -> %02x)", s_batt_pct, s_batt_mv, v, w[1]);
+}
+
+// ── FT3168 touch (Arduino_DriveBus Arduino_FT3x68: reset timing, registers; Waveshare BSP: reset GPIO 9) ──
+#define FT3168_ADDR          0x38
+#define FT3168_PIN_RST       9
+#define FT3168_REG_FINGERS   0x02   // finger count, then X1 high/low and Y1 high/low (0x03-0x06, 12 bits each)
+#define FT3168_REG_ID        0xA0   // 0x03: FT3168
+#define FT3168_REG_POWER     0xA5
+#define FT3168_POWER_MONITOR 0x01   // monitor mode: low power, wakes itself on a touch (Arduino_FT3x68's default)
+#define FT3168_MAX_FINGERS   2
+static i2c_master_dev_handle_t s_touch;
+
+/// Reset the touch controller (it doesn't answer until this) and put it in monitor mode. After watch_probe only.
+static bool watch_touch_init(void) {
+    gpio_config_t rst = { .pin_bit_mask = 1ULL << FT3168_PIN_RST, .mode = GPIO_MODE_OUTPUT };
+    gpio_config(&rst);
+    gpio_set_level(FT3168_PIN_RST, 1);
+    vTaskDelay(pdMS_TO_TICKS(1));
+    gpio_set_level(FT3168_PIN_RST, 0);
+    vTaskDelay(pdMS_TO_TICKS(20));
+    gpio_set_level(FT3168_PIN_RST, 1);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    i2c_device_config_t dc = { .dev_addr_length = I2C_ADDR_BIT_LEN_7, .device_address = FT3168_ADDR,
+                               .scl_speed_hz = WATCH_I2C_HZ };
+    uint8_t reg = FT3168_REG_ID, id = 0;
+    const uint8_t mode[2] = { FT3168_REG_POWER, FT3168_POWER_MONITOR };
+    bool ok = i2c_master_probe(s_i2c_bus, FT3168_ADDR, 50) == ESP_OK &&
+              i2c_master_bus_add_device(s_i2c_bus, &dc, &s_touch) == ESP_OK &&
+              i2c_master_transmit_receive(s_touch, &reg, 1, &id, 1, 50) == ESP_OK &&
+              i2c_master_transmit(s_touch, mode, sizeof(mode), 50) == ESP_OK;
+    ESP_LOGI(TAG, "touch FT3x68: %s (id %02x)", ok ? "ready" : "no answer after reset", id);
+    if (!ok && s_touch) { i2c_master_bus_rm_device(s_touch); s_touch = NULL; }
+    return ok;
+}
+
+/// One finger's position while the screen is touched (lcd_touch_fn, polled by the screen task).
+static bool watch_touch_read(int *x, int *y) {
+    uint8_t reg = FT3168_REG_FINGERS, d[5];
+    if (i2c_master_transmit_receive(s_touch, &reg, 1, d, sizeof(d), 20) != ESP_OK) return false;
+    uint8_t n = d[0] & 0x0F;
+    if (n < 1 || n > FT3168_MAX_FINGERS) return false;
+    *x = ((d[1] & 0x0F) << 8) | d[2];
+    *y = ((d[3] & 0x0F) << 8) | d[4];
+    return true;
 }
 #endif
 
@@ -3282,7 +3362,11 @@ static void board_init(void) {
     }
 #endif
 #if CONFIG_IDF_TARGET_ESP32S3
-    if (s_board == BOARD_WAVESHARE_AMOLED_206 && lcd_open_amoled()) lcd_start(b->name, FW_VERSION, lcd_fill);
+    if (s_board == BOARD_WAVESHARE_AMOLED_206) {
+        watch_battery_init();
+        if (watch_touch_init()) lcd_set_touch(watch_touch_read);
+        if (lcd_open_amoled()) lcd_start(b->name, FW_VERSION, lcd_fill);
+    }
 #endif
     heap_check("boot: after LED start");
 }

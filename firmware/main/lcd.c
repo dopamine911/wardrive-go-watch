@@ -46,6 +46,7 @@ static const char *TAG = "WardriveESP";
 #define IDLE_DIM_MS  30000  // nobody linked this long: dim the backlight
 #define BL_ON   255
 #define BL_DIM  40
+#define TOUCH_SLEEP_MS 30000 // touch screens: no touch this long and the panel goes dark (an alert lights it again)
 
 typedef struct { uint8_t c, n; uint8_t p[16]; uint16_t ms; } init_t;
 
@@ -174,6 +175,7 @@ static char s_alert_label[13];
 static volatile uint32_t s_alert_rgb;
 static volatile bool s_alert_police;
 static uint32_t s_t0;
+static lcd_touch_fn s_touch;        // touch screens (the watch): finger down and where, polled once a frame
 
 // Channel activity from AP sightings (14 × 2.4 GHz, then 28 × 5 GHz). The counts themselves come from apcount via the
 // fill callback; "+N new" is the session count now minus ten seconds ago.
@@ -490,17 +492,28 @@ static void lcd_task(void *arg) {
     (void)arg;
     bool dark = false;
     int bl = -1;
-    uint32_t last_decay = now_ms(), last_linked = now_ms();
+    uint32_t last_decay = now_ms(), last_linked = now_ms(), last_active = now_ms();
     lcd_frame_t f;
     for (;;) {
         uint32_t now = now_ms();
-        if (s_stealth != dark) {
-            dark = s_stealth;
+        int tx = 0, ty = 0;
+        bool down = s_touch && s_touch(&tx, &ty);
+        bool alert = (int32_t)(s_alert_until - now) > 0;
+        if (down || alert) last_active = now;
+        bool asleep = s_touch && now - last_active > TOUCH_SLEEP_MS;
+        bool want_dark = s_stealth || asleep;
+        if (want_dark != dark) {
+            dark = want_dark;
             lcd_bus_lock();
             cmd(dark ? 0x28 : 0x29, NULL, 0);
             lcd_bus_unlock();
             if (dark) { backlight(0); bl = 0; }
             else memset(s_hash, 0, sizeof(s_hash));   // redraw everything on the way back
+            if (s_touch && !s_stealth) {
+                if (dark) ESP_LOGI(TAG, "lcd: screen off (no touch for %u s)", (unsigned)(TOUCH_SLEEP_MS / 1000));
+                else if (down) ESP_LOGI(TAG, "lcd: screen on (touch at %d,%d)", tx, ty);
+                else ESP_LOGI(TAG, "lcd: screen on (alert)");
+            }
         }
         if (dark) { vTaskDelay(pdMS_TO_TICKS(FRAME_MS)); continue; }
 
@@ -591,3 +604,4 @@ void lcd_alert(const char *label, uint32_t ms, bool soft, uint32_t rgb, bool pol
 }
 
 void lcd_set_stealth(bool on) { s_stealth = on; }
+void lcd_set_touch(lcd_touch_fn fn) { s_touch = fn; }
