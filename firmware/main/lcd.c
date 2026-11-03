@@ -169,7 +169,7 @@ static const uint16_t SLEEP_STEPS[]  = { 15, 30, 60, 120 };   // seconds without
 #define NVS_NS        "iosesp"
 #define NVS_BRIGHT    "scrbright"
 #define NVS_SLEEP     "scrsleep"
-static lcd_scan_toggle_fn s_scan_toggle;
+static lcd_scan_fn s_scan;
 static gest_t s_gest;
 static bool s_wake_finger;            // the finger that woke the panel: ignored until it lifts
 static uint8_t s_page, s_net_first;
@@ -552,12 +552,17 @@ static void settings_save(void) {
     nvs_close(h);
 }
 
-/// A button pressed (held): what it does. The scan button only acts while a scan runs or a host could start one.
+/// A button pressed (held): what it does. SCAN acts while a scan runs or a host listens; MODE only while a host listens
+/// (the mode resets to Wi-Fi on every link, so one picked with nobody listening would be thrown away).
 static void watch_press(int btn) {
     if (btn == LCD_BTN_SCAN) {
-        if (!s_scan_toggle || !(s_frame.st.scanning || s_frame.st.can_scan)) return;
+        if (!s_scan || !(s_frame.st.scanning || s_frame.st.can_scan)) return;
         ESP_LOGI(TAG, "watch: scan %s", s_frame.st.scanning ? "paused" : "resumed");
-        s_scan_toggle();
+        s_scan(LCD_SCAN_PAUSE_RESUME);
+    } else if (btn == LCD_BTN_MODE) {
+        if (!s_scan || !s_frame.st.can_scan) return;
+        ESP_LOGI(TAG, "watch: mode after %s", s_frame.st.mode);
+        s_scan(LCD_SCAN_NEXT_MODE);
     } else if (btn == LCD_BTN_BRIGHT) {
         s_bright_pct = (uint8_t)next_step(BRIGHT_STEPS, sizeof(BRIGHT_STEPS) / sizeof(*BRIGHT_STEPS), s_bright_pct);
         settings_save();
@@ -756,9 +761,9 @@ void lcd_alert(const char *label, uint32_t ms, bool soft, uint32_t rgb, bool pol
 
 void lcd_set_stealth(bool on) { s_stealth = on; }
 void lcd_set_touch(lcd_touch_fn fn) { s_touch = fn; }
-void lcd_set_scan_toggle(lcd_scan_toggle_fn fn) {
+void lcd_set_scan(lcd_scan_fn fn) {
 #if CONFIG_IDF_TARGET_ESP32S3
-    s_scan_toggle = fn;
+    s_scan = fn;
 #else
     (void)fn;
 #endif

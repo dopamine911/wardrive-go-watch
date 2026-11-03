@@ -97,3 +97,15 @@ Same watch, phone and toolchain. Firmware: Phase 2–3 plus the native 410×502 
 | 29 | Drawing cost | pass | HW-LOG (5 s windows, dashboard): before, 25 frames per 5 s at 126–134 ms painting each; after (data once a second, touches and alerts at once), 5 frames per 5 s at 81–131 ms; 0–1 ms state, 1–5 ms panel I/O, 2–3 ms touch; display task stack ≥ 1.7 KB left |
 | 30 | Panel corners | pass | HW-EYE: a calibration screen of nested outlines showed the visible area's corners at ~110 px radius (90 cut, 110 whole). The layout keeps clear of that curve (`W_CORNER_R`); "nothing cut off" on the watch |
 | 31 | Layout previews | pass | AUTO/visual: `docs/previews/*.png` rendered by `tools/lcd_preview.c -DLCD_WATCH=1` from the firmware's own drawing code |
+
+## MODE button (2026-11-03)
+
+A spike first (throwaway build, reverted): the SCAN button cycled modes with the app's own commands. Wardrive Go
+accepted watch-initiated switches and sent no mode commands back over 90 s and three full cycles. Then the feature.
+
+| # | Check | Result | Evidence |
+|---|---|---|---|
+| 32 | All chips build | pass | BUILD: esp32s3 0x149c40 (31 % free); esp32c3, esp32c6, esp32c5 (CSI line removed) unchanged in size; warnings identical to untouched upstream |
+| 33 | MODE cycles Wi-Fi → Bluetooth → capture → Wi-Fi | pass | HW-LOG: `watch: mode after WIFI` → `cmd: 'bt on'` → `bluetooth scan started`; `after BT` → `cap on` → `capture started`; `after CAP` → `cap off` → `stream started`. HW-EYE: the MODE label and Wardrive Go (Android) both followed every hold |
+| 34 | The app doesn't override the watch's mode | pass (one phone, one board) | HW-LOG: no `bt off` / `cap off` / `wdstream … -wifi` from the app after any watch-initiated switch. Untested: iPhone, several boards linked at once |
+| 35 | Layout with four buttons | pass | AUTO/visual: `docs/previews/w5-controls-holding.png`, `w6-controls-no-phone.png` inside the measured 110 px corner curve; MODE dimmed while no host listens |

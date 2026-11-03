@@ -47,8 +47,10 @@ typedef struct {
 } lcd_status_t;
 
 typedef void (*lcd_fill_fn)(lcd_status_t *st);
-/// The watch's scan button: pause the scan when it runs, start it again when a host holds the board.
-typedef void (*lcd_scan_toggle_fn)(void);
+/// The watch's scan buttons: pause the scan when it runs (start it again when a host listens), or move the board to its
+/// next scan mode (Wi-Fi, Bluetooth, capture) with the same commands the app sends.
+typedef enum { LCD_SCAN_PAUSE_RESUME, LCD_SCAN_NEXT_MODE } lcd_scan_action_t;
+typedef void (*lcd_scan_fn)(lcd_scan_action_t action);
 
 /// Koko Marauder V8 check: only when a pin of its shared SPI bus already reads pulled up (input-only sense), reads the
 /// panel ID over SPI and keeps the bus when it is an ILI9341. Logs what it saw either way.
@@ -76,8 +78,8 @@ typedef bool (*lcd_touch_fn)(int *x, int *y);
 /// Hand the screen its touch input (the watch): pages, controls, and the panel going dark after its timeout without a
 /// touch, back on the next touch or alert. The scan and Bluetooth carry on either way.
 void lcd_set_touch(lcd_touch_fn fn);
-/// The watch's scan button calls this (on the screen task).
-void lcd_set_scan_toggle(lcd_scan_toggle_fn fn);
+/// The watch's SCAN and MODE buttons call this (on the screen task).
+void lcd_set_scan(lcd_scan_fn fn);
 /// The bus's microSD slot, once the ILI9341 screen runs and the slot's chip select read pulled up (Koko V8, AWOK Dual
 /// C5): its SPI host and chip select. False on every other board.
 bool lcd_sd_slot(int *host, int *cs);

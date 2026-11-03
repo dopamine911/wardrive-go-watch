@@ -1010,8 +1010,8 @@ static void mini_sd_sent(const lcd_frame_t *f) {
 #define W_TILE_H 70
 #define W_BTN_X WM
 #define W_BTN_Y0 104
-#define W_BTN_H 60
-#define W_BTN_GAP 8
+#define W_BTN_H 52
+#define W_BTN_GAP 6
 #define W_ROW_Y0 104             // networks page: first row, row pitch, row height
 #define W_ROW_PITCH 70
 #define W_ROW_H 64
@@ -1259,8 +1259,8 @@ static void w_button(const lcd_frame_t *f, int b, const char *label, const char 
     rrect(W_BTN_X, y, w, W_BTN_H, 14, C_PANEL, 16);
     if (held && enabled && f->hold_pct) rrect(W_BTN_X, y, w * f->hold_pct / 100, W_BTN_H, 14, C_CYAN, 5);
     rrect_line(W_BTN_X, y, w, W_BTN_H, 14, held ? 2 : 1, edge, 16);
-    text_ex(&wfont_title, W_BTN_X + 18, y + 39, label, 1, enabled ? C_WHITE : C_DIM, enabled ? C_WHITE : C_DIM, SOLID, 16);
-    text_r(&wfont_body, W - W_BTN_X - 18, y + 41, value, enabled ? vc : C_DIM);
+    text_ex(&wfont_title, W_BTN_X + 18, y + 35, label, 1, enabled ? C_WHITE : C_DIM, enabled ? C_WHITE : C_DIM, SOLID, 16);
+    text_r(&wfont_body, W - W_BTN_X - 18, y + 37, value, enabled ? vc : C_DIM);
 }
 
 static void w_info(int y, const char *label, const char *value) {
@@ -1278,23 +1278,26 @@ static void w_controls(const lcd_frame_t *f) {
     char b[40];
     const char *sv = st->scanning ? "RUNNING" : st->can_scan ? "PAUSED" : (st->usb || st->ble) ? "OPEN THE APP" : "NEEDS PHONE";
     w_button(f, LCD_BTN_SCAN, "SCAN", sv, st->scanning ? C_GREEN : C_AMBER, st->scanning || st->can_scan);
+    const char *mv = !strcmp(st->mode, "BT") ? "BLUETOOTH" : !strcmp(st->mode, "CAP") ? "CAPTURE" : "WI-FI";
+    uint16_t mc = !strcmp(st->mode, "BT") ? C_BLUE : !strcmp(st->mode, "CAP") ? C_MAG : C_CYAN;
+    w_button(f, LCD_BTN_MODE, "MODE", mv, mc, st->can_scan);
     snprintf(b, sizeof(b), "%u%%", f->bright_pct);
     w_button(f, LCD_BTN_BRIGHT, "BRIGHTNESS", b, C_CYAN, true);
     snprintf(b, sizeof(b), "%u s", f->sleep_s);
     w_button(f, LCD_BTN_SLEEP, "SCREEN OFF", b, C_CYAN, true);
-    hgrad(WM, 318, W - 2 * WM, 1, C_EDGE, C_EDGE);
-    w_info(348, "BLE", st->ble_name[0] ? st->ble_name : "--");
+    hgrad(WM, 342, W - 2 * WM, 1, C_EDGE, C_EDGE);
+    w_info(368, "BLE", st->ble_name[0] ? st->ble_name : "--");
     if (st->usb) snprintf(b, sizeof(b), "USB host");
     else if (st->ble) snprintf(b, sizeof(b), "%s  MTU %u", st->holder[0] ? st->holder : "phone", st->mtu);
     else snprintf(b, sizeof(b), "advertising");
-    w_info(378, "LINK", b);
+    w_info(394, "LINK", b);
     if (st->batt_pct >= 0) snprintf(b, sizeof(b), "%d%%  %d.%02d V", st->batt_pct, st->batt_mv / 1000, st->batt_mv % 1000 / 10);
     else snprintf(b, sizeof(b), "--");
-    w_info(408, "BATTERY", b);
+    w_info(420, "BATTERY", b);
     char up[12], ver[40];
     w_clock(up, sizeof(up), (f->now - f->t0) / 1000);
     snprintf(ver, sizeof(ver), "%s  up %s", f->version, up);   // one row: an uptime row would sit inside the corner curve
-    w_info(438, "FIRMWARE", ver);
+    w_info(446, "FIRMWARE", ver);
     w_dots(f);
 }
 

@@ -3345,7 +3345,7 @@ static void board_caps_set(const board_def_t *b) {
 }
 
 #if CONFIG_IDF_TARGET_ESP32S3
-static void watch_scan_toggle(void);   // the watch's scan button (after run_command)
+static void watch_scan(lcd_scan_action_t action);   // the watch's SCAN and MODE buttons (after run_command)
 #endif
 
 // Boot: the battery gauge (if any), the board's identity, and its LED ring when the identity names one.
@@ -3403,7 +3403,7 @@ static void board_init(void) {
     if (s_board == BOARD_WAVESHARE_AMOLED_206) {
         watch_battery_init();
         if (watch_touch_init()) lcd_set_touch(watch_touch_read);
-        lcd_set_scan_toggle(watch_scan_toggle);
+        lcd_set_scan(watch_scan);
         if (lcd_open_amoled()) lcd_start(b->name, FW_VERSION, lcd_fill);
     }
 #endif
@@ -3808,10 +3808,13 @@ static void run_command(const uint8_t *text, size_t len, uint8_t src) {
 }
 
 #if CONFIG_IDF_TARGET_ESP32S3
-/// The watch's scan button: exactly the `stop` / `start` the app itself sends (run like any command, under the command
-/// lock), so the board, the app and the log all see an ordinary stop or start. Called on the screen task.
-static void watch_scan_toggle(void) {
-    const char *c = (s_streaming || s_bt_running || s_cap_running || s_csi_running) ? "stop" : "start";
+/// The watch's SCAN and MODE buttons: exactly the commands the app itself sends (run like any command, under the command
+/// lock), so the board, the app and the log all see an ordinary stop / start or mode change. Pause: `stop` / `start`.
+/// Next mode: Wi-Fi -> Bluetooth (`bt on`) -> capture (`cap on`) -> Wi-Fi (`cap off`). Called on the screen task.
+static void watch_scan(lcd_scan_action_t action) {
+    const char *c;
+    if (action == LCD_SCAN_NEXT_MODE) c = s_role == ROLE_WIFI ? "bt on" : s_role == ROLE_BT ? "cap on" : "cap off";
+    else c = (s_streaming || s_bt_running || s_cap_running || s_csi_running) ? "stop" : "start";
     run_command((const uint8_t *)c, strlen(c), SINK_BLE);
 }
 
