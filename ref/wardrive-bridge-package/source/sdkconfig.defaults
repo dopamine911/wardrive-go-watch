@@ -1,0 +1,19 @@
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=247
+CONFIG_BT_NIMBLE_GAP_DEVICE_NAME_MAX_LEN=32
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=6144
+CONFIG_FREERTOS_CHECK_STACKOVERFLOW_CANARY=y
+# USB OTA on UART0 boards: keep receiving while flash is erased.
+CONFIG_UART_ISR_IN_IRAM=y
+# Offline runs on the microSD card (sdrun.c): keep file names as written (run_12.csv)
+CONFIG_FATFS_LFN_HEAP=y
+# FATFS sizes its sector buffers by the largest sector it may see: 4 KB by default (flash wear levelling, unused
+# here). SD cards use 512-byte sectors, so each open file and the volume take 512 bytes instead of 4 KB.
+CONFIG_WL_SECTOR_SIZE_512=y
