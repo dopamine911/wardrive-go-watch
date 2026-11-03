@@ -35,15 +35,18 @@ typedef struct {
     uint32_t sd_rate;        // bytes a second for this file (0 = not known yet)
     uint32_t sd_sent_ms;     // how long SENT has shown
     uint32_t sd_sent_bytes;  // every run taken this time
-    // The watch (410x502): counts it measures itself, its link and its recent networks
+    // The watch (410x502): counts it measures itself, its link and its recent sightings, for the mode it is in
     bool     scanning;       // the scan for `mode` is running
     bool     can_scan;       // a host is listening (the phone subscribed, or a USB session), so a scan can start
     uint32_t aps_link;       // unique APs since this host linked (0 = none linked)
     int      batt_mv;        // 0 = unknown
     char     ble_name[24];   // the board's advertised name
     uint16_t mtu;            // the phone link's ATT MTU (0 = no phone)
+    uint32_t bt_now;         // Bluetooth mode: devices so far in the current 10 s window (bt_devices: the last whole one)
+    uint32_t bt_windows;     // Bluetooth mode: windows since the mode started
+    uint32_t cap_hs, cap_pmkid, cap_clients;   // capture mode: handshakes, PMKIDs, stations, this capture session
     uint8_t  nets_n;         // entries in nets, most recently heard first
-    netlog_rec_t nets[NETLOG_N];
+    netlog_rec_t nets[NETLOG_N];   // Wi-Fi and capture: APs; Bluetooth: devices (ch 0, auth = address type)
 } lcd_status_t;
 
 typedef void (*lcd_fill_fn)(lcd_status_t *st);

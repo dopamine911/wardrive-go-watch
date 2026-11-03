@@ -118,6 +118,35 @@ static void watch_scenes(const char *dir, lcd_frame_t *f) {
     f->page = LCD_PAGE_NETS;
     save_watch(dir, "w8-networks-empty", f);
 
+    // Bluetooth mode: the device count and the devices page; capture mode: its artifacts.
+    st->ble = true;
+    strcpy(st->holder, "Pixel11Pro");
+    st->scanning = st->can_scan = true;
+    strcpy(st->mode, "BT");
+    st->bt_devices = 37;
+    st->bt_now = 12;
+    st->bt_windows = 9;
+    st->nets_n = 0;
+    net(st, 0x101, "Galaxy Buds2", -52, 0, "public");
+    net(st, 0x102, "", -77, 0, "random");
+    net(st, 0x103, "Tile", -69, 0, "random");
+    net(st, 0x104, "JBL Flip 6", -84, 0, "public");
+    f->page = LCD_PAGE_DASH;
+    save_watch(dir, "w11-dashboard-bt", f);
+    f->page = LCD_PAGE_NETS;
+    save_watch(dir, "w12-devices-bt", f);
+    strcpy(st->mode, "CAP");
+    st->channel = 6;
+    f->cur = lcd_act_index(6);
+    f->live = 19;
+    st->cap_hs = 2;
+    st->cap_pmkid = 1;
+    st->cap_clients = 14;
+    f->page = LCD_PAGE_DASH;
+    save_watch(dir, "w13-dashboard-cap", f);
+    strcpy(st->mode, "WIFI");
+    st->nets_n = 0;
+
     f->page = LCD_PAGE_DASH;
     f->alerting = true;
     f->alert_on = true;

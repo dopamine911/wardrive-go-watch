@@ -1129,33 +1129,53 @@ static void w_dashboard(const lcd_frame_t *f) {
     w_background();
     w_header(f);
     w_status(f);
-    // In range now, big, with the "+N new in the last 10 s" pill on the right.
-    fill(WM, 132, 4, 20, C_CYAN);
-    text_ex(&wfont_label, WM + 12, 150, "IN RANGE NOW", 1, C_DIM, C_DIM, SOLID, 16);
+    // The big number: APs in range (Wi-Fi scan, capture), or Bluetooth devices heard in the last whole 10 s window.
+    bool bt = !strcmp(st->mode, "BT"), cap = !strcmp(st->mode, "CAP");
+    fill(WM, 132, 4, 20, bt ? C_BLUE : C_CYAN);
+    text_ex(&wfont_label, WM + 12, 150, bt ? "BLE DEVICES LAST 10 S" : "IN RANGE NOW", 1, C_DIM, C_DIM, SOLID, 16);
     char b[24];
-    if (f->fresh) {
+    if (!bt && f->fresh) {   // "+N new in the last 10 s"
         snprintf(b, sizeof(b), "+%lu", (unsigned long)f->fresh);
         int pw = text_w(&wfont_title, b, 1) + 20;
         rrect(W - WM - pw, 128, pw, 28, 14, C_GREEN, 4);
         rrect_line(W - WM - pw, 128, pw, 28, 14, 2, C_GREEN, 14);
         text_ex(&wfont_title, W - WM - pw + 10, 151, b, 1, C_GREEN, C_GREEN, SOLID, 16);
     }
-    snprintf(b, sizeof(b), "%lu", (unsigned long)f->live);
+    snprintf(b, sizeof(b), "%lu", (unsigned long)(bt ? st->bt_devices : f->live));
     const lcd_font_t *nf = text_w(&wfont_huge, b, 3) <= W - 2 * WM ? &wfont_huge : &wfont_big;
     int base = nf == &wfont_huge ? 248 : 236;
-    w_glow(nf, WM, base, b, 3, C_TEAL, 6);
-    text_ex(nf, WM, base, b, 3, C_WHITE, C_CYAN, VERT, 16);
-    w_spectrum(f, 292, 30);
-    // Counts this watch measured itself (the app sends none back), the channel and the scan.
+    w_glow(nf, WM, base, b, 3, bt ? C_BLUE : C_TEAL, 6);
+    text_ex(nf, WM, base, b, 3, C_WHITE, bt ? C_BLUE : C_CYAN, VERT, 16);
+    if (!bt) w_spectrum(f, 292, 30);   // Wi-Fi channels; Bluetooth has none to show
+    // Counts this watch measured itself (the app sends none back), for the mode the board is in, and the scan.
     const int x1 = WM, x2 = W - WM - W_TILE_W, y1 = 300, y2 = 376;
-    snprintf(b, sizeof(b), "%lu", (unsigned long)f->session);
-    w_tile(x1, y1, "SINCE BOOT", b, NULL, C_CYAN, C_WHITE);
-    if (st->usb || st->ble) snprintf(b, sizeof(b), "%lu", (unsigned long)st->aps_link);
-    else snprintf(b, sizeof(b), "--");
-    w_tile(x2, y1, "THIS SESSION", b, NULL, C_GREEN, C_WHITE);
-    if (st->channel) snprintf(b, sizeof(b), "%u", st->channel);
-    else snprintf(b, sizeof(b), "--");
-    w_tile(x1, y2, "CHANNEL", b, st->channel ? "2.4 GHz" : NULL, C_YEL, C_WHITE);
+    if (bt) {
+        snprintf(b, sizeof(b), "%lu", (unsigned long)st->bt_now);
+        w_tile(x1, y1, "THIS WINDOW", b, NULL, C_BLUE, C_WHITE);
+        snprintf(b, sizeof(b), "%lu", (unsigned long)st->bt_windows);
+        w_tile(x2, y1, "WINDOWS", b, NULL, C_BLUE, C_WHITE);
+        int best = -128;
+        for (int i = 0; i < st->nets_n; i++) if (st->nets[i].rssi > best) best = st->nets[i].rssi;
+        if (st->nets_n) snprintf(b, sizeof(b), "%d", best);
+        else snprintf(b, sizeof(b), "--");
+        w_tile(x1, y2, "STRONGEST", b, st->nets_n ? "dBm" : NULL, C_YEL, C_WHITE);
+    } else if (cap) {
+        snprintf(b, sizeof(b), "%lu", (unsigned long)st->cap_hs);
+        w_tile(x1, y1, "HANDSHAKES", b, NULL, C_MAG, C_WHITE);
+        snprintf(b, sizeof(b), "%lu", (unsigned long)st->cap_pmkid);
+        w_tile(x2, y1, "PMKIDS", b, NULL, C_MAG, C_WHITE);
+        snprintf(b, sizeof(b), "%lu", (unsigned long)st->cap_clients);
+        w_tile(x1, y2, "CLIENTS", b, NULL, C_GREEN, C_WHITE);
+    } else {
+        snprintf(b, sizeof(b), "%lu", (unsigned long)f->session);
+        w_tile(x1, y1, "SINCE BOOT", b, NULL, C_CYAN, C_WHITE);
+        if (st->usb || st->ble) snprintf(b, sizeof(b), "%lu", (unsigned long)st->aps_link);
+        else snprintf(b, sizeof(b), "--");
+        w_tile(x2, y1, "THIS SESSION", b, NULL, C_GREEN, C_WHITE);
+        if (st->channel) snprintf(b, sizeof(b), "%u", st->channel);
+        else snprintf(b, sizeof(b), "--");
+        w_tile(x1, y2, "CHANNEL", b, st->channel ? "2.4 GHz" : NULL, C_YEL, C_WHITE);
+    }
     bool linked = st->usb || st->ble;   // linked but not listening: the phone's app isn't open (or hasn't subscribed)
     const char *scan = st->scanning ? "ON" : st->can_scan ? "PAUSED" : linked ? "WAITING" : "OFF";
     uint16_t sc = st->scanning ? C_GREEN : st->can_scan || linked ? C_AMBER : C_DIM;
@@ -1185,6 +1205,7 @@ static uint16_t w_auth_color(const char *auth) {
 
 static void w_networks(const lcd_frame_t *f) {
     const lcd_status_t *st = &f->st;
+    bool bt = !strcmp(st->mode, "BT");   // Bluetooth mode lists devices; Wi-Fi and capture list APs
     w_background();
     w_header(f);
     char b[40];
@@ -1192,9 +1213,10 @@ static void w_networks(const lcd_frame_t *f) {
     int last = first + LCD_NETS_ROWS < st->nets_n ? first + LCD_NETS_ROWS : st->nets_n;
     if (st->nets_n > LCD_NETS_ROWS) snprintf(b, sizeof(b), "%d-%d OF %u", first + 1, last, st->nets_n);
     else snprintf(b, sizeof(b), "%u RECENT", st->nets_n);
-    w_title("NETWORKS", st->nets_n ? b : "");
+    w_title(bt ? "DEVICES" : "NETWORKS", st->nets_n ? b : "");
     if (!st->nets_n) {
-        const char *a = "NO NETWORKS YET", *c = (st->usb || st->ble) ? "scanning..." : "shown once Wardrive Go links";
+        const char *a = bt ? "NO DEVICES YET" : "NO NETWORKS YET";
+        const char *c = (st->usb || st->ble) ? "scanning..." : "shown once Wardrive Go links";
         text_ex(&wfont_title, (W - text_w(&wfont_title, a, 2)) / 2, 260, a, 2, C_DIM, C_DIM, SOLID, 16);
         text(&wfont_label, (W - text_w(&wfont_label, c, 0)) / 2, 296, c, C_FAINT);
         w_dots(f);
@@ -1204,7 +1226,7 @@ static void w_networks(const lcd_frame_t *f) {
         const netlog_rec_t *r = &st->nets[i];
         int y = W_ROW_Y0 + (i - first) * W_ROW_PITCH;
         if (y + W_ROW_H <= s_y0 || y >= s_y0 + SH) continue;
-        uint16_t ac = w_auth_color(r->auth);
+        uint16_t ac = bt ? C_BLUE : w_auth_color(r->auth);
         const int rl = W_ROW_M + 14, rr = W - W_ROW_M - 12;
         rrect(W_ROW_M, y, W - 2 * W_ROW_M, W_ROW_H, 10, C_PANEL, 16);
         rrect(W_ROW_M + 5, y + 10, 4, W_ROW_H - 20, 2, ac, 16);
@@ -1225,15 +1247,16 @@ static void w_networks(const lcd_frame_t *f) {
         }
         ssid[k] = '\0';
         char fit[40];
-        w_fit(&wfont_body, r->ssid_len ? ssid : "<hidden>", rx - 12 - rl, fit, sizeof(fit));
+        w_fit(&wfont_body, r->ssid_len ? ssid : bt ? "<no name>" : "<hidden>", rx - 12 - rl, fit, sizeof(fit));
         text(&wfont_body, rl, y + 30, fit, r->ssid_len ? C_WHITE : C_DIM);
-        // second line: BSSID, then channel and security
+        // second line: the address, then (Wi-Fi) channel and security or (Bluetooth) the address type
         const uint8_t *m = r->bssid;
         snprintf(b, sizeof(b), "%02X:%02X:%02X:%02X:%02X:%02X", m[0], m[1], m[2], m[3], m[4], m[5]);
         text(&wfont_label, rl, y + 56, b, C_DIM);
         const char *auth = r->auth ? (!strcmp(r->auth, "WPA2_WPA3") ? "WPA2/3" : r->auth) : "?";
         int aw = text_w(&wfont_label, auth, 0);
         text(&wfont_label, rr - aw, y + 56, auth, ac);
+        if (bt) continue;
         snprintf(b, sizeof(b), "ch%u", r->ch);
         text(&wfont_label, rr - aw - 10 - text_w(&wfont_label, b, 0), y + 56, b, C_YEL);
     }

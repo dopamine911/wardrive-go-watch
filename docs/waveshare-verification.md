@@ -64,6 +64,7 @@ Nothing here comes from a simulator. Host tests cover only the hardware-independ
 | O9 | Drawing a watch frame is slow on the chip | known, contained | HW-LOG: painting ~80–130 ms per dashboard frame (0.6 ms on a PC). Touch is followed between strips (#24), and the watch draws its data once a second (#29), so it costs ~10 % of one core. Alert frames run up to ~450 ms, so their blink is slower than the 250 ms design. Cause not pinned down (INFER: flash-cache misses on code and fonts) |
 | O10 | Long serial captures lose stretches of log | bench tooling | Captures of a minute or more sometimes stop receiving and deliver part of the backlog on the next open; the lost stretch is gone. Upstream logs through the ESP-IDF console when no USB session is open. Boot captures and short captures were reliable. Product behaviour is unaffected (the app path showed no gaps) |
 | O11 | A phone linked but not subscribed (Wardrive Go in the background) never starts the scan | upstream behaviour, now visible | HW-LOG: `phone connected` with no `notifications on` until the app was opened. The watch shows SCAN `WAITING` / `OPEN THE APP` for that state (#28) |
+| O12 | Screen task stack headroom | watch, unmeasured baseline | HW-LOG: `stack left 1024` of 4096 bytes after Bluetooth and capture runs (#36–37); no earlier figure to compare. INFER (0.6): the deepest call is the formatted diagnostic `ESP_LOGI` itself, unchanged by the per-mode pages. Watch it in the soak; raise the task stack if it drops |
 
 ## Phase 2–3: battery, phone alerts, touch, screen sleep (2026-11-03)
 
@@ -109,3 +110,15 @@ accepted watch-initiated switches and sent no mode commands back over 90 s and t
 | 33 | MODE cycles Wi-Fi → Bluetooth → capture → Wi-Fi | pass | HW-LOG: `watch: mode after WIFI` → `cmd: 'bt on'` → `bluetooth scan started`; `after BT` → `cap on` → `capture started`; `after CAP` → `cap off` → `stream started`. HW-EYE: the MODE label and Wardrive Go (Android) both followed every hold |
 | 34 | The app doesn't override the watch's mode | pass (one phone, one board) | HW-LOG: no `bt off` / `cap off` / `wdstream … -wifi` from the app after any watch-initiated switch. Untested: iPhone, several boards linked at once |
 | 35 | Layout with four buttons | pass | AUTO/visual: `docs/previews/w5-controls-holding.png`, `w6-controls-no-phone.png` inside the measured 110 px corner curve; MODE dimmed while no host listens |
+
+## Pages follow the mode (2026-11-03)
+
+Found on the watch: in Bluetooth mode page 1 counted Wi-Fi APs (decaying to 0) beside a stale channel and page 2 showed
+old networks; in capture mode page 2 froze (capture's `WD:AP`s bypassed the list) and its handshakes, PMKIDs and
+clients weren't shown. Now the dashboard and page 2 show what the current mode measures.
+
+| # | Check | Result | Evidence |
+|---|---|---|---|
+| 36 | Bluetooth mode | pass | HW-EYE: page 1 shows BLE DEVICES LAST 10 S, THIS WINDOW, WINDOWS, STRONGEST, no channel bars; page 2 is a DEVICES list (name or `<no name>`, address, RSSI, public/random). HW-LOG: `bt on` → `bluetooth scan started`, pages 0–2 visited, no fault |
+| 37 | Capture mode | pass | HW-EYE: page 1 shows HANDSHAKES, PMKIDS, CLIENTS and the channel bars; page 2 NETWORKS fills from capture's AP sightings. HW-LOG: `cap on` → `capture started`; `lcd: 84 frames in 60 s, avg 164 ms` while capturing |
+| 38 | Builds and previews | pass | BUILD: esp32s3 0x149f90; esp32c3/c6/c5 unchanged in size and warnings. AUTO: `tools/netlog_test.c` passes; `docs/previews/w11-dashboard-bt.png`, `w12-devices-bt.png`, `w13-dashboard-cap.png` |

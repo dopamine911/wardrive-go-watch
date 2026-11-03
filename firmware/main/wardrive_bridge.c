@@ -524,9 +524,20 @@ static char lower_hex_digit(uint8_t v) { return (char)(v < 10 ? '0' + v : 'a' + 
 static void sd_note_ap(const wifi_ap_record_t *ap, size_t ssid_len);   // the offline run (see "microSD")
 
 #if CONFIG_IDF_TARGET_ESP32S3
-// The watch's recent networks (its networks page): every WD:AP goes in, the screen task copies them out.
-static netlog_t s_netlog;
+// The watch's recent sightings (its second page): every WD:AP into one list (Wi-Fi scan and capture alike), every WD:BT
+// into the other; the screen task copies out the one for the mode the board is in.
+static netlog_t s_netlog, s_btlog;
 static portMUX_TYPE s_netlog_lock = portMUX_INITIALIZER_UNLOCKED;
+static void watch_note(netlog_t *l, const uint8_t addr[6], const void *name, size_t len, int rssi, uint8_t ch,
+                       const char *what) {
+    if (!lcd_running()) return;
+    taskENTER_CRITICAL(&s_netlog_lock);
+    netlog_note(l, addr, (const uint8_t *)name, len, rssi, ch, what, (uint32_t)(esp_timer_get_time() / 1000));
+    taskEXIT_CRITICAL(&s_netlog_lock);
+}
+#define WATCH_NOTE(list, ...) watch_note(&(list), __VA_ARGS__)
+#else
+#define WATCH_NOTE(list, ...) ((void)0)   // no watch on this chip
 #endif
 
 static void send_ap_line(const wifi_ap_record_t *ap) {
@@ -546,14 +557,7 @@ static void send_ap_line(const wifi_ap_record_t *ap) {
     apc_add(ap->bssid, (uint32_t)(esp_timer_get_time() / 1000));
     display_note_ap(ap->bssid, ap->primary);
     lcd_note_ap(ap->bssid, ap->primary);
-#if CONFIG_IDF_TARGET_ESP32S3
-    if (lcd_running()) {
-        taskENTER_CRITICAL(&s_netlog_lock);
-        netlog_note(&s_netlog, ap->bssid, ap->ssid, ssid_len, ap->rssi, ap->primary, auth_name(ap->authmode),
-                    (uint32_t)(esp_timer_get_time() / 1000));
-        taskEXIT_CRITICAL(&s_netlog_lock);
-    }
-#endif
+    WATCH_NOTE(s_netlog, ap->bssid, ap->ssid, ssid_len, ap->rssi, ap->primary, auth_name(ap->authmode));
     if (sdrun_active()) sd_note_ap(ap, ssid_len);
 }
 
@@ -635,6 +639,7 @@ static void send_bt_line(const bt_rec_t *r) {
               (unsigned long)(esp_timer_get_time() / 1000), m[0], m[1], m[2], m[3], m[4], m[5],
               bt_addr_type_name(r->addr_type), r->rssi, name_hex, mfg, (unsigned)r->conn);
     s_bt_count++;
+    WATCH_NOTE(s_btlog, r->mac, r->name, r->name_len, r->rssi, 0, bt_addr_type_name(r->addr_type));
 }
 
 static int on_disc_event(struct ble_gap_event *event, void *arg) {
@@ -1198,6 +1203,7 @@ static void cap_emit_ap(const uint8_t *b, const uint8_t *ssid, int ssid_len, int
               (unsigned long)(esp_timer_get_time() / 1000), b[0], b[1], b[2], b[3], b[4], b[5],
               ssid_hex, rssi, ch, auth, ssid_len ? 0u : 1u);
     s_cap_aps++;
+    WATCH_NOTE(s_netlog, b, ssid, ssid_len > 0 ? (size_t)ssid_len : 0, rssi, (uint8_t)ch, auth);
 }
 
 // A station sighting, deduped once per capture session. Broadcast/multicast/zero MACs are not devices.
@@ -3312,8 +3318,8 @@ static void lcd_fill(lcd_status_t *st) {
     sdx_fill(st);
     OTA_FILL(st);
 #if CONFIG_IDF_TARGET_ESP32S3
-    // The watch: its own counts, link and recent networks. This runs on the screen task only, so the link-edge state
-    // and the copy of the network list need no lock of their own.
+    // The watch: its own counts, link and recent sightings, for the mode the board is in. This runs on the screen task
+    // only, so the link-edge state and the copy of the list need no lock of their own.
     static bool was_linked;
     static uint32_t link_base;
     static netlog_t nets;
@@ -3326,8 +3332,15 @@ static void lcd_fill(lcd_status_t *st) {
     st->batt_mv = s_has_batt ? s_batt_mv : 0;
     strlcpy(st->ble_name, s_name, sizeof(st->ble_name));
     st->mtu = s_bt_up && st->ble ? ble_att_mtu(s_conn_handle) : 0;
+    bool bt = s_role == ROLE_BT;
+    if (bt) st->channel = 0;   // the last Wi-Fi channel means nothing while the radio scans Bluetooth
+    st->bt_now = s_bt_count;
+    st->bt_windows = s_bt_windows;
+    st->cap_hs = s_cap_hs;
+    st->cap_pmkid = s_cap_pmkid;
+    st->cap_clients = s_cap_clients;
     taskENTER_CRITICAL(&s_netlog_lock);
-    nets = s_netlog;
+    nets = bt ? s_btlog : s_netlog;
     taskEXIT_CRITICAL(&s_netlog_lock);
     st->nets_n = (uint8_t)netlog_recent(&nets, st->nets, NETLOG_N);
 #endif
