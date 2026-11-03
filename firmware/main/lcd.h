@@ -1,10 +1,13 @@
-// WardriveESP — color status screens over SPI: the Koko Marauder V8's 240x320 ILI9341 and the Marauder Mini v3's
-// 128x128 ST7735. Only ever driven once a probe has read the panel's ID; every other board never touches these pins.
+// WardriveESP — color status screens: the Koko Marauder V8's 240x320 ILI9341 and the Marauder Mini v3's 128x128 ST7735
+// over SPI, the Waveshare ESP32-S3 Touch AMOLED 2.06's 410x502 CO5300 over QSPI. Only ever driven once the board was
+// identified from its hardware; every other board never touches these pins.
 // SPDX-License-Identifier: MIT
 #pragma once
 
 #include <stdbool.h>
 #include <stdint.h>
+
+#include "netlog.h"
 
 /// What the dashboard shows, filled by wardrive_bridge.c a few times a second.
 typedef struct {
@@ -32,9 +35,20 @@ typedef struct {
     uint32_t sd_rate;        // bytes a second for this file (0 = not known yet)
     uint32_t sd_sent_ms;     // how long SENT has shown
     uint32_t sd_sent_bytes;  // every run taken this time
+    // The watch (410x502): counts it measures itself, its link and its recent networks
+    bool     scanning;       // the scan for `mode` is running
+    bool     can_scan;       // a host is listening (the phone subscribed, or a USB session), so a scan can start
+    uint32_t aps_link;       // unique APs since this host linked (0 = none linked)
+    int      batt_mv;        // 0 = unknown
+    char     ble_name[24];   // the board's advertised name
+    uint16_t mtu;            // the phone link's ATT MTU (0 = no phone)
+    uint8_t  nets_n;         // entries in nets, most recently heard first
+    netlog_rec_t nets[NETLOG_N];
 } lcd_status_t;
 
 typedef void (*lcd_fill_fn)(lcd_status_t *st);
+/// The watch's scan button: pause the scan when it runs, start it again when a host holds the board.
+typedef void (*lcd_scan_toggle_fn)(void);
 
 /// Koko Marauder V8 check: only when a pin of its shared SPI bus already reads pulled up (input-only sense), reads the
 /// panel ID over SPI and keeps the bus when it is an ILI9341. Logs what it saw either way.
@@ -57,11 +71,13 @@ void lcd_note_ap(const uint8_t *bssid, uint8_t channel);
 void lcd_alert(const char *label, uint32_t ms, bool soft, uint32_t rgb, bool police);
 /// Stealth: panel and backlight off.
 void lcd_set_stealth(bool on);
-/// A touch screen: true while a finger is down, with its panel coordinates. Polled once a frame by the screen task.
+/// A touch screen: true while a finger is down, with its panel coordinates. Polled by the screen task.
 typedef bool (*lcd_touch_fn)(int *x, int *y);
-/// Hand the screen its touch input (the watch). With one set, the panel goes dark after 30 s without a touch and comes
-/// back on the next touch or alert; the scan and Bluetooth carry on either way.
+/// Hand the screen its touch input (the watch): pages, controls, and the panel going dark after its timeout without a
+/// touch, back on the next touch or alert. The scan and Bluetooth carry on either way.
 void lcd_set_touch(lcd_touch_fn fn);
+/// The watch's scan button calls this (on the screen task).
+void lcd_set_scan_toggle(lcd_scan_toggle_fn fn);
 /// The bus's microSD slot, once the ILI9341 screen runs and the slot's chip select read pulled up (Koko V8, AWOK Dual
 /// C5): its SPI host and chip select. False on every other board.
 bool lcd_sd_slot(int *host, int *cs);

@@ -1,6 +1,7 @@
 // Renders the color screens' scenes on a PC with the firmware's own drawing code (main/lcd_draw.c), as PPM images
-// (each scene at 240x320 and 128x128), so the layout can be checked without flashing a board.
-//   zig cc -O2 -I main tools/lcd_preview.c main/lcd_draw.c -o lcd_preview && ./lcd_preview <out dir>
+// (each scene at 240x320 and 128x128, and with -DLCD_WATCH=1 the watch's 410x502 pages), so the layout can be checked
+// without flashing a board.
+//   cc -O2 -DLCD_WATCH=1 -I main tools/lcd_preview.c main/lcd_draw.c -o lcd_preview && ./lcd_preview <out dir>
 // SPDX-License-Identifier: MIT
 
 #include <stdio.h>
@@ -15,8 +16,9 @@ static void save1(const char *dir, const char *name, const lcd_frame_t *f) {
     if (!o) { perror(path); return; }
     fprintf(o, "P6\n%d %d\n255\n", f->w, f->h);
     for (int y0 = 0; y0 < f->h; y0 += LCD_SH) {
+        int rows = f->h - y0 < LCD_SH ? f->h - y0 : LCD_SH;   // the last strip may be partial
         lcd_draw_strip(strip, y0, f);
-        for (int i = 0; i < f->w * LCD_SH; i++) {
+        for (int i = 0; i < f->w * rows; i++) {
             uint16_t c = (uint16_t)((strip[i] >> 8) | (strip[i] << 8));
             unsigned char px[3] = { (unsigned char)((c >> 11) * 255 / 31), (unsigned char)(((c >> 5) & 63) * 255 / 63),
                                     (unsigned char)((c & 31) * 255 / 31) };
@@ -32,6 +34,104 @@ static void save(const char *dir, const char *name, lcd_frame_t *f) {
     f->w = 240; f->h = 320; save1(dir, name, f);
     f->w = 128; f->h = 128; save1(dir, name, f);
 }
+
+#if LCD_WATCH
+static void save_watch(const char *dir, const char *name, lcd_frame_t *f) {
+    f->w = 410; f->h = 502; save1(dir, name, f);
+}
+
+static void net(lcd_status_t *st, uint32_t id, const char *ssid, int rssi, uint8_t ch, const char *auth) {
+    netlog_rec_t *r = &st->nets[st->nets_n++];
+    const uint8_t m[6] = { 0xA8, 0x40, 0x41, (uint8_t)(id >> 16), (uint8_t)(id >> 8), (uint8_t)id };
+    memcpy(r->bssid, m, 6);
+    r->ssid_len = (uint8_t)strlen(ssid);
+    strcpy(r->ssid, ssid);
+    r->rssi = (int8_t)rssi;
+    r->ch = ch;
+    r->auth = auth;
+}
+
+// The watch's pages with a plausible walk around town.
+static void watch_scenes(const char *dir, lcd_frame_t *f) {
+    memset(f, 0, sizeof(*f));
+    f->board = "Waveshare AMOLED 2.06";
+    f->version = "1.7.5";
+    f->t0 = 1000;
+    f->bright_pct = 100;
+    f->sleep_s = 30;
+    f->hold_btn = -1;
+    static const uint8_t ACT[LCD_ACT_N] = { 200, 10, 30, 0, 0, 240, 60, 0, 20, 0, 220, 40, 0 };
+    memcpy(f->act, ACT, sizeof(ACT));
+    f->now = f->t0 + 900;
+    save_watch(dir, "w1-splash", f);
+
+    lcd_status_t *st = &f->st;
+    f->now = f->t0 + 1543000;
+    st->ble = true;
+    strcpy(st->holder, "Pixel11Pro");
+    strcpy(st->mode, "WIFI");
+    strcpy(st->ble_name, "WardriveESP-476A");
+    st->mtu = 247;
+    st->channel = 6;
+    f->cur = lcd_act_index(6);
+    st->scanning = st->can_scan = true;
+    st->batt_pct = 82;
+    st->batt_mv = 3987;
+    f->live = 23;
+    f->session = 187;
+    f->fresh = 3;
+    st->aps_link = 64;
+    save_watch(dir, "w2-dashboard", f);
+
+    net(st, 1, "dragino-3296cc", -67, 11, "WPA2");
+    net(st, 2, "RT-AC66U_B1_A8_2G", -78, 11, "WPA2");
+    net(st, 3, "", -81, 6, "WPA2");
+    net(st, 4, "Starbucks WiFi", -54, 1, "OPEN");
+    net(st, 5, "VIAANIX_LOWER_2G", -79, 1, "WPA2_WPA3");
+    net(st, 6, "caf\xc3\xa9-guest", -71, 6, "WPA");
+    net(st, 7, "Viaanix", -48, 7, "WPA2");
+    net(st, 8, "a-very-long-network-name-indeed-1", -88, 13, "WEP");
+    f->page = LCD_PAGE_NETS;
+    save_watch(dir, "w3-networks", f);
+    f->net_first = 5;
+    save_watch(dir, "w4-networks-scrolled", f);
+
+    f->page = LCD_PAGE_CTRL;
+    f->hold_btn = LCD_BTN_BRIGHT;
+    f->hold_pct = 60;
+    save_watch(dir, "w5-controls-holding", f);
+
+    f->hold_btn = -1;
+    f->hold_pct = 0;
+    st->ble = false;
+    st->holder[0] = 0;
+    st->scanning = st->can_scan = false;
+    st->mtu = 0;
+    st->channel = 0;
+    f->cur = -1;
+    f->live = 0;
+    f->fresh = 0;
+    save_watch(dir, "w6-controls-no-phone", f);
+    f->page = LCD_PAGE_DASH;
+    save_watch(dir, "w7-dashboard-no-phone", f);
+    st->nets_n = 0;
+    f->page = LCD_PAGE_NETS;
+    save_watch(dir, "w8-networks-empty", f);
+
+    f->page = LCD_PAGE_DASH;
+    f->alerting = true;
+    f->alert_on = true;
+    f->alert_rgb = 0x00C8FF;
+    strcpy(f->alert, "DRONE");
+    save_watch(dir, "w9-alert", f);
+    f->alerting = false;
+    st->ota = true;
+    st->ota_pct = 63;
+    st->ota_total_kb = 1192;
+    st->ota_kb = 751;
+    save_watch(dir, "w10-update", f);
+}
+#endif
 
 int main(int argc, char **argv) {
     const char *dir = argc > 1 ? argv[1] : ".";
@@ -120,5 +220,8 @@ int main(int argc, char **argv) {
     f.st.sd_sent_ms = 1200;
     f.st.sd_sent_bytes = 2391 * 1024;
     save(dir, "13-sd-sent", &f);
+#if LCD_WATCH
+    watch_scenes(dir, &f);
+#endif
     return 0;
 }

@@ -1,7 +1,7 @@
 // WardriveESP — color status screens: the Koko Marauder V8's 240x320 ILI9341 and the Marauder Mini v3's 128x128 ST7735
 // over SPI, and the Waveshare ESP32-S3 Touch AMOLED 2.06's 410x502 CO5300 over QSPI. Boot splash, live dashboard,
-// alerts (scenes in lcd_draw.c). Drawn in 16-row strips into one small DMA buffer; a strip goes to the panel only when
-// its pixels changed.
+// alerts (scenes in lcd_draw.c); on the watch, three touch pages. Drawn in 16-row strips into one small DMA buffer; a
+// strip goes to the panel only when its pixels changed.
 // SPDX-License-Identifier: MIT
 
 #include <stdio.h>
@@ -25,6 +25,10 @@
 #include "esp_lcd_io_spi.h"
 #include "esp_lcd_panel_io.h"
 #endif
+#if CONFIG_IDF_TARGET_ESP32S3
+#include "nvs.h"
+#include "gesture.h"
+#endif
 
 static const char *TAG = "WardriveESP";
 
@@ -46,7 +50,13 @@ static const char *TAG = "WardriveESP";
 #define IDLE_DIM_MS  30000  // nobody linked this long: dim the backlight
 #define BL_ON   255
 #define BL_DIM  40
-#define TOUCH_SLEEP_MS 30000 // touch screens: no touch this long and the panel goes dark (an alert lights it again)
+#define BL_LEVEL(pct) ((pct) * 255 / 100)
+// Touch screens (the watch): its loop and its drawing pace.
+#define TOUCH_POLL_MS 20                   // touch polling while the panel is lit (and between strips of a frame)
+#define HOLD_FRAME_MS 50                   // redraws while a button fills under a held finger
+#define DIAG_MS       60000                // the screen's own numbers in the log this often
+#define ANIM_STEP_MS  1000                 // the watch's idle animations (pulses, scan dots) step once a second
+#define SPLASH_FAST_MS 2500                // the boot splash's radar sweeps smoothly (it shows for 2.2 s)
 
 typedef struct { uint8_t c, n; uint8_t p[16]; uint16_t ms; } init_t;
 
@@ -127,15 +137,10 @@ __attribute__((unused)) static const panel_t MINI = { "128x128 ST7735", 128, 128
 #define AM_W          410
 #define AM_H          502
 #define AM_XGAP       22
-#define AM_CLEAR_ROWS 8                    // rows per blanking write: 410 x 8 x 2 bytes fits the 240 x 16 strip buffer
 // QSPI framing (esp_lcd_sh8601.c): a register write is opcode 02h then 00 <cmd> 00 on one line; pixels are opcode 32h
 // then 00 2Ch 00, the data on four lines.
 #define AM_OP_CMD     0x02u
 #define AM_OP_PIXELS  0x32u
-// Every window the CO5300 takes starts on an even column and row and spans an even count (the BSP's LVGL rounder).
-// The 240x320 dashboard sits centered, one pixel left and up so both offsets stay even.
-#define AM_SCENE_X    (AM_XGAP + ((AM_W - 240) / 2 & ~1))
-#define AM_SCENE_Y    ((AM_H - 320) / 2 & ~1)
 
 // Power-up: the reset pin first (lcd_open_amoled), then MADCTL RGB and 16-bit color (what esp_lcd_sh8601 sends before a
 // vendor table), then Waveshare's table (BSP lcd_init_cmds) with brightness 0. Display on (29h) comes in lcd_start once
@@ -153,11 +158,26 @@ static const init_t INIT_CO5300[] = {
     { 0x2A, 4, { 0x00, AM_XGAP, (AM_XGAP + AM_W - 1) >> 8, (AM_XGAP + AM_W - 1) & 0xFF }, 0 },
     { 0x2B, 4, { 0x00, 0x00, (AM_H - 1) >> 8, (AM_H - 1) & 0xFF }, 0 },
 };
-static const panel_t AMOLED = { "410x502 CO5300", 240, 320, AM_SCENE_X, AM_SCENE_Y, -1, false, INIT_CO5300,
+static const panel_t AMOLED = { "410x502 CO5300", AM_W, AM_H, AM_XGAP, 0, -1, false, INIT_CO5300,
                                 sizeof(INIT_CO5300) / sizeof(INIT_CO5300[0]), true };
 static esp_lcd_panel_io_handle_t s_io;
 static SemaphoreHandle_t s_io_done;   // the pixels of the last strip are out: the strip buffer can be drawn again
+
+// The watch's screen settings (controls page), kept in NVS. Both step through these on each press.
+static const uint16_t BRIGHT_STEPS[] = { 25, 50, 75, 100 };   // percent
+static const uint16_t SLEEP_STEPS[]  = { 15, 30, 60, 120 };   // seconds without a touch before the panel goes dark
+#define NVS_NS        "iosesp"
+#define NVS_BRIGHT    "scrbright"
+#define NVS_SLEEP     "scrsleep"
+static lcd_scan_toggle_fn s_scan_toggle;
+static gest_t s_gest;
+static bool s_wake_finger;            // the finger that woke the panel: ignored until it lifts
+static uint8_t s_page, s_net_first;
+static int8_t s_hold_btn = LCD_BTN_NONE;
+static uint8_t s_hold_pct;
 #endif
+static uint8_t  s_bright_pct = 100;   // the watch's brightness setting (every other screen stays at full)
+static uint16_t s_sleep_s = 30;       // the watch's screen-off timeout
 
 static const panel_t *s_panel;
 static spi_device_handle_t s_dev;
@@ -175,7 +195,13 @@ static char s_alert_label[13];
 static volatile uint32_t s_alert_rgb;
 static volatile bool s_alert_police;
 static uint32_t s_t0;
-static lcd_touch_fn s_touch;        // touch screens (the watch): finger down and where, polled once a frame
+static lcd_touch_fn s_touch;        // touch screens (the watch): finger down and where
+static lcd_frame_t s_frame;         // the frame being drawn (static: the watch's carries its recent networks, ~1.6 KB)
+static bool s_down, s_dark;                 // the finger now, the panel dark
+static volatile bool s_redraw;              // a touch or a new alert changed what the frame shows: draw it now
+static int s_tx, s_ty;
+static uint32_t s_poll_at, s_touch_at;      // last touch poll, last time a finger was down
+static void touch_tick(uint32_t now);
 
 // Channel activity from AP sightings (14 × 2.4 GHz, then 28 × 5 GHz). The counts themselves come from apcount via the
 // fill callback; "+N new" is the session count now minus ten seconds ago.
@@ -419,21 +445,31 @@ static void window(int y0, int y1) {
 }
 
 // `lock`: take the bus for each changed strip only, so the microSD card (an offline run, or the app reading runs off it)
-// waits one strip at most, never a whole frame's drawing.
-static void render(const lcd_frame_t *f, bool lock) {
-    int w = s_panel->w;
-    for (int k = 0; k < s_panel->h / SH; k++) {
-        int y0 = k * SH;
+// waits one strip at most, never a whole frame's drawing. The last strip may be partial (the watch: 502 = 31 x 16 + 6).
+// Returns how many strips went to the panel. Adds its own time to s_touch_us / s_paint_us / s_io_us (the bench log).
+static int64_t s_touch_us, s_paint_us, s_io_us;
+static int render(const lcd_frame_t *f, bool lock) {
+    int w = s_panel->w, sent = 0;
+    for (int k = 0; k * SH < s_panel->h; k++) {
+        int y0 = k * SH, rows = s_panel->h - y0 < SH ? s_panel->h - y0 : SH;
+        int64_t t0 = esp_timer_get_time();
+        touch_tick(now_ms());   // the finger keeps being followed while a long frame draws
+        int64_t t1 = esp_timer_get_time();
         lcd_draw_strip(s_strip, y0, f);
         uint32_t h = 2166136261u;
         const uint32_t *px = (const uint32_t *)s_strip;
-        for (int i = 0; i < w * SH / 2; i++) h = (h ^ px[i]) * 16777619u;
+        for (int i = 0; i < w * rows / 2; i++) h = (h ^ px[i]) * 16777619u;
+        int64_t t2 = esp_timer_get_time();
+        s_touch_us += t1 - t0;
+        s_paint_us += t2 - t1;
         if (h == s_hash[k]) continue;
         if (lock) lcd_bus_lock();
-        window(y0, y0 + SH - 1);
-        if (send(true, s_strip, (size_t)w * SH * 2) == ESP_OK) s_hash[k] = h;
+        window(y0, y0 + rows - 1);
+        if (send(true, s_strip, (size_t)w * rows * 2) == ESP_OK) { s_hash[k] = h; sent++; }
         if (lock) lcd_bus_unlock();
+        s_io_us += esp_timer_get_time() - t2;
     }
+    return sent;
 }
 
 // One frame's worth of state, gathered once.
@@ -458,6 +494,16 @@ static void gather(lcd_frame_t *f, uint32_t now) {
     f->alert_police = s_alert_police;
     f->board = s_board;
     f->version = s_version;
+    f->bright_pct = s_bright_pct;
+    f->sleep_s = s_sleep_s;
+#if CONFIG_IDF_TARGET_ESP32S3
+    f->page = s_page;
+    f->net_first = s_net_first;
+    f->hold_btn = s_hold_btn;
+    f->hold_pct = s_hold_pct;
+#else
+    f->hold_btn = LCD_BTN_NONE;
+#endif
 }
 
 // Backlight PWM, or on an AMOLED (no backlight pin) the panel's own brightness, 0-255 either way.
@@ -474,62 +520,167 @@ static void backlight(int duty) {
 }
 
 #if CONFIG_IDF_TARGET_ESP32S3
-// The reset leaves noise in the AMOLED's memory and the dashboard covers only the middle: black the whole panel once.
-static void am_clear(void) {
-    memset(s_strip, 0, (size_t)AM_W * AM_CLEAR_ROWS * 2);
-    const uint8_t ca[] = { 0x00, AM_XGAP, (AM_XGAP + AM_W - 1) >> 8, (AM_XGAP + AM_W - 1) & 0xFF };
-    cmd(0x2A, ca, 4);
-    for (int y = 0; y < AM_H; y += AM_CLEAR_ROWS) {
-        int rows = AM_H - y < AM_CLEAR_ROWS ? AM_H - y : AM_CLEAR_ROWS;
-        const uint8_t ra[] = { (uint8_t)(y >> 8), (uint8_t)y, (uint8_t)((y + rows - 1) >> 8), (uint8_t)(y + rows - 1) };
-        cmd(0x2B, ra, 4);
-        send(true, s_strip, (size_t)AM_W * rows * 2);
+// ── the watch's touch pages ──
+static uint16_t next_step(const uint16_t *steps, size_t n, uint16_t v) {
+    for (size_t i = 0; i < n; i++) if (steps[i] == v) return steps[(i + 1) % n];
+    return steps[0];
+}
+
+static bool is_step(const uint16_t *steps, size_t n, uint16_t v) {
+    for (size_t i = 0; i < n; i++) if (steps[i] == v) return true;
+    return false;
+}
+
+static void settings_load(void) {
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
+    uint8_t b;
+    uint16_t s;
+    if (nvs_get_u8(h, NVS_BRIGHT, &b) == ESP_OK && is_step(BRIGHT_STEPS, sizeof(BRIGHT_STEPS) / sizeof(*BRIGHT_STEPS), b))
+        s_bright_pct = b;
+    if (nvs_get_u16(h, NVS_SLEEP, &s) == ESP_OK && is_step(SLEEP_STEPS, sizeof(SLEEP_STEPS) / sizeof(*SLEEP_STEPS), s))
+        s_sleep_s = s;
+    nvs_close(h);
+}
+
+static void settings_save(void) {
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) { ESP_LOGW(TAG, "watch: settings not saved"); return; }
+    nvs_set_u8(h, NVS_BRIGHT, s_bright_pct);
+    nvs_set_u16(h, NVS_SLEEP, s_sleep_s);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+/// A button pressed (held): what it does. The scan button only acts while a scan runs or a host could start one.
+static void watch_press(int btn) {
+    if (btn == LCD_BTN_SCAN) {
+        if (!s_scan_toggle || !(s_frame.st.scanning || s_frame.st.can_scan)) return;
+        ESP_LOGI(TAG, "watch: scan %s", s_frame.st.scanning ? "paused" : "resumed");
+        s_scan_toggle();
+    } else if (btn == LCD_BTN_BRIGHT) {
+        s_bright_pct = (uint8_t)next_step(BRIGHT_STEPS, sizeof(BRIGHT_STEPS) / sizeof(*BRIGHT_STEPS), s_bright_pct);
+        settings_save();
+        ESP_LOGI(TAG, "watch: brightness %u%%", s_bright_pct);
+    } else if (btn == LCD_BTN_SLEEP) {
+        s_sleep_s = next_step(SLEEP_STEPS, sizeof(SLEEP_STEPS) / sizeof(*SLEEP_STEPS), s_sleep_s);
+        settings_save();
+        ESP_LOGI(TAG, "watch: screen off after %u s", s_sleep_s);
     }
 }
+
+/// One touch poll through the gestures: pages, scrolling, the held button. True when the picture changes.
+static bool watch_input(bool down, int x, int y, uint32_t now) {
+    if (s_wake_finger) {   // the touch that woke the panel is only a wake, never a press on what it shows
+        if (!down) s_wake_finger = false;
+        s_gest = (gest_t){0};
+        return false;
+    }
+    int8_t was_btn = s_hold_btn;
+    uint8_t was_pct = s_hold_pct, was_page = s_page, was_first = s_net_first;
+    gesture_t g = gest_feed(&s_gest, down, x, y, now);
+    uint8_t nets = s_frame.st.nets_n;
+    if (g == GEST_LEFT && s_page + 1 < LCD_PAGES) s_page++;
+    else if (g == GEST_RIGHT && s_page > 0) s_page--;
+    else if (g == GEST_UP && s_page == LCD_PAGE_NETS && s_net_first + LCD_NETS_ROWS < nets) s_net_first += LCD_NETS_ROWS;
+    else if (g == GEST_DOWN && s_page == LCD_PAGE_NETS) s_net_first = s_net_first > LCD_NETS_ROWS ? s_net_first - LCD_NETS_ROWS : 0;
+    else if (g == GEST_HOLD && s_page == LCD_PAGE_CTRL) watch_press(lcd_watch_button_at(s_gest.x0, s_gest.y0));
+    if (g == GEST_LEFT || g == GEST_RIGHT) ESP_LOGI(TAG, "watch: page %u", s_page);
+    bool still = s_page == LCD_PAGE_CTRL && s_gest.down && !s_gest.moved && !s_gest.held;
+    s_hold_btn = (int8_t)(still ? lcd_watch_button_at(s_gest.x0, s_gest.y0) : LCD_BTN_NONE);
+    s_hold_pct = s_hold_btn != LCD_BTN_NONE ? (uint8_t)gest_hold_pct(&s_gest, now) : 0;
+    return g == GEST_HOLD || s_page != was_page || s_net_first != was_first || s_hold_btn != was_btn ||
+           s_hold_pct != was_pct;
+}
 #endif
+
+// The finger, polled at most every TOUCH_POLL_MS: from the task loop and between strips while a frame draws, so a swipe
+// or a hold is seen however long the frame takes. While the panel is dark it only notes the finger (that is the wake).
+static void touch_tick(uint32_t now) {
+    if (!s_touch || now - s_poll_at < TOUCH_POLL_MS) return;
+    s_poll_at = now;
+    s_down = s_touch(&s_tx, &s_ty);
+    if (s_down) s_touch_at = now;
+#if CONFIG_IDF_TARGET_ESP32S3
+    if (!s_dark && watch_input(s_down, s_tx, s_ty, now)) s_redraw = true;
+#endif
+}
 
 static void lcd_task(void *arg) {
     (void)arg;
     bool dark = false;
     int bl = -1;
-    uint32_t last_decay = now_ms(), last_linked = now_ms(), last_active = now_ms();
-    lcd_frame_t f;
+    uint32_t last_decay = now_ms(), last_linked = now_ms(), last_active = now_ms(), last_render = 0;
+    uint32_t diag_at = now_ms(), frames = 0, strips = 0;
+    int64_t draw_us = 0, worst_us = 0, gather_us = 0;
+    lcd_frame_t *f = &s_frame;
     for (;;) {
         uint32_t now = now_ms();
-        int tx = 0, ty = 0;
-        bool down = s_touch && s_touch(&tx, &ty);
+        touch_tick(now);
         bool alert = (int32_t)(s_alert_until - now) > 0;
-        if (down || alert) last_active = now;
-        bool asleep = s_touch && now - last_active > TOUCH_SLEEP_MS;
+        if (alert) last_active = now;
+        if (s_touch && (int32_t)(s_touch_at - last_active) > 0) last_active = s_touch_at;
+        bool asleep = s_touch && now - last_active > (uint32_t)s_sleep_s * 1000;
         bool want_dark = s_stealth || asleep;
         if (want_dark != dark) {
-            dark = want_dark;
+            dark = s_dark = want_dark;
             lcd_bus_lock();
             cmd(dark ? 0x28 : 0x29, NULL, 0);
             lcd_bus_unlock();
             if (dark) { backlight(0); bl = 0; }
-            else memset(s_hash, 0, sizeof(s_hash));   // redraw everything on the way back
+            else { memset(s_hash, 0, sizeof(s_hash)); last_render = 0; }   // redraw everything on the way back
+#if CONFIG_IDF_TARGET_ESP32S3
+            if (!dark) s_wake_finger = s_down;
+#endif
             if (s_touch && !s_stealth) {
-                if (dark) ESP_LOGI(TAG, "lcd: screen off (no touch for %u s)", (unsigned)(TOUCH_SLEEP_MS / 1000));
-                else if (down) ESP_LOGI(TAG, "lcd: screen on (touch at %d,%d)", tx, ty);
+                if (dark) ESP_LOGI(TAG, "lcd: screen off (no touch for %u s)", s_sleep_s);
+                else if (s_down) ESP_LOGI(TAG, "lcd: screen on (touch at %d,%d)", s_tx, s_ty);
                 else ESP_LOGI(TAG, "lcd: screen on (alert)");
             }
         }
         if (dark) { vTaskDelay(pdMS_TO_TICKS(FRAME_MS)); continue; }
 
-        gather(&f, now);
-        if (f.st.ble || f.st.usb) last_linked = now;
-        if (now - last_decay >= 1000) {   // activity fades; a new second's slot starts at zero
-            last_decay = now;
-            for (int i = 0; i < LCD_ACT_N; i++) s_act[i] = (uint8_t)(s_act[i] * 3 / 4);
-            s_session_at[(now / 1000) % 10] = f.session;
+        bool dirty = s_redraw, holding = false;
+        s_redraw = false;
+#if CONFIG_IDF_TARGET_ESP32S3
+        holding = s_hold_btn != LCD_BTN_NONE;
+#endif
+        // Without touch the loop runs once a frame and draws every time, as before. The watch draws its data once
+        // ANIM_STEP_MS (a channel hopping six times a second is flicker, not information), right away on a touch or a new
+        // alert, and at the frame's pace only while something moves on purpose: a held button, an alert, the splash,
+        // an update.
+        bool moving = holding || f->alerting || f->st.ota || now - s_t0 < SPLASH_FAST_MS;
+        uint32_t period = holding ? HOLD_FRAME_MS : f->alerting ? ALERT_BLINK_MS / 2 : s_touch && !moving ? ANIM_STEP_MS : FRAME_MS;
+        if (!s_touch || dirty || now - last_render + TOUCH_POLL_MS / 2 >= period) {
+            int64_t t = esp_timer_get_time();
+            gather(f, now);
+            gather_us += esp_timer_get_time() - t;
+            if (f->st.ble || f->st.usb) last_linked = now;
+            if (now - last_decay >= 1000) {   // activity fades; a new second's slot starts at zero
+                last_decay = now;
+                for (int i = 0; i < LCD_ACT_N; i++) s_act[i] = (uint8_t)(s_act[i] * 3 / 4);
+                s_session_at[(now / 1000) % 10] = f->session;
+            }
+            strips += (uint32_t)render(f, true);
+            int64_t us = esp_timer_get_time() - t;
+            draw_us += us;
+            if (us > worst_us) worst_us = us;
+            frames++;
+            last_render = now;
+            int on = BL_LEVEL(s_bright_pct);
+            int want = f->alerting || f->st.ota || now - last_linked <= IDLE_DIM_MS ? on : on < BL_DIM ? on : BL_DIM;
+            if (want != bl) { backlight(want); bl = want; }
         }
-        bool alerting = f.alerting;
-        render(&f, true);
-
-        int want = alerting || f.st.ota || now - last_linked <= IDLE_DIM_MS ? BL_ON : BL_DIM;
-        if (want != bl) { backlight(want); bl = want; }
-        vTaskDelay(pdMS_TO_TICKS(alerting ? ALERT_BLINK_MS / 2 : FRAME_MS));
+        if (s_touch && now - diag_at >= DIAG_MS && frames) {   // the watch: what drawing costs, for the bench log
+            ESP_LOGI(TAG, "lcd: %lu frames in %lu s, avg %lu ms (paint %lu, panel %lu, touch %lu, state %lu), worst %lu ms, "
+                     "%lu strips sent, stack left %lu",
+                     (unsigned long)frames, (unsigned long)((now - diag_at) / 1000), (unsigned long)(draw_us / frames / 1000),
+                     (unsigned long)(s_paint_us / frames / 1000), (unsigned long)(s_io_us / frames / 1000),
+                     (unsigned long)(s_touch_us / frames / 1000), (unsigned long)(gather_us / frames / 1000),
+                     (unsigned long)(worst_us / 1000), (unsigned long)strips, (unsigned long)uxTaskGetStackHighWaterMark(NULL));
+            diag_at = now; frames = strips = 0; draw_us = worst_us = gather_us = s_paint_us = s_io_us = s_touch_us = 0;
+        }
+        vTaskDelay(pdMS_TO_TICKS(s_touch ? TOUCH_POLL_MS : period));
     }
 }
 
@@ -558,15 +709,14 @@ void lcd_start(const char *board, const char *version, lcd_fill_fn fill_fn) {
         if (in->ms) vTaskDelay(pdMS_TO_TICKS(in->ms));
     }
 #if CONFIG_IDF_TARGET_ESP32S3
-    if (s_panel->qspi) am_clear();
+    if (s_touch) settings_load();
 #endif
     s_t0 = now_ms();
-    lcd_frame_t f;
-    gather(&f, s_t0);
-    render(&f, false);   // the splash is on the panel before it lights up (the bus is already held)
+    gather(&s_frame, s_t0);
+    render(&s_frame, false);   // the splash is on the panel before it lights up (the bus is already held)
     cmd(0x29, NULL, 0);
     lcd_bus_unlock();
-    backlight(BL_ON);
+    backlight(BL_LEVEL(s_bright_pct));
     if (xTaskCreate(lcd_task, "wd_lcd", 4096, NULL, 1, &s_task) != pdPASS) { s_task = NULL; return; }
     ESP_LOGI(TAG, "lcd: %s running", s_panel->name);
 }
@@ -601,7 +751,15 @@ void lcd_alert(const char *label, uint32_t ms, bool soft, uint32_t rgb, bool pol
     s_alert_police = police;
     s_alert_since = now;
     s_alert_until = now + ms;
+    s_redraw = true;
 }
 
 void lcd_set_stealth(bool on) { s_stealth = on; }
 void lcd_set_touch(lcd_touch_fn fn) { s_touch = fn; }
+void lcd_set_scan_toggle(lcd_scan_toggle_fn fn) {
+#if CONFIG_IDF_TARGET_ESP32S3
+    s_scan_toggle = fn;
+#else
+    (void)fn;
+#endif
+}

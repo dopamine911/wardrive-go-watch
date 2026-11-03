@@ -5,11 +5,12 @@ Every result is labelled with the kind of evidence behind it:
 | Label | Meaning |
 |---|---|
 | **BUILD** | compiler output |
+| **AUTO** | host tests and render comparisons on the PC (`firmware/tools/`) |
 | **HW-LOG** | the watch's serial log or USB protocol output |
 | **HW-EYE** | the user looking at the watch or the phone |
 | **INFER** | reasoning, not observed |
 
-Nothing here comes from a simulator, and there are no automated tests yet.
+Nothing here comes from a simulator. Host tests cover only the hardware-independent modules.
 
 ## Slice 1: boot, Wi-Fi scan → Wardrive Go, live screen (2026-11-03)
 
@@ -53,13 +54,16 @@ Nothing here comes from a simulator, and there are no automated tests yet.
 | # | Issue | Status | Evidence |
 |---|---|---|---|
 | O1 | One screen freeze plus the watch dropping off USB | **not reproduced** | HW-EYE: dashboard frozen at clock 0:04 (about 6 s after boot) and the watch absent from `lsusb` while plugged in. It recovered after the app was foregrounded and the cable replugged. This happened right after a log capture that reset the watch and then closed the port. The freeze did not recur with the app backgrounded for 60 s (#11). The kernel log is unreadable (user not in `adm`). INFER: tied to the bench reset or port close, not to the firmware's normal running. Not proven. |
-| O2 | Screen setup holds up boot for about 1.4 s before Wi-Fi starts | known | HW-LOG: `board:` at 564 ms, `lcd … running` at 1934 ms. Same synchronous pattern as the upstream color screens |
-| O3 | Dashboard is the 240×320 layout, centred | by design for slice 1 | The native 410×502 layout is Phase 4 |
-| O4 | Screen brightness and timeout controls, on-watch scan start/stop | not started | Phase 4 (controls screen) |
+| O2 | Screen setup holds up boot for about 1 s before Wi-Fi starts | known | HW-LOG: `board:` at 568 ms, `lcd … running` at 1678 ms (1.4 s at slice 1; the separate blanking pass went with the native layout). Same synchronous pattern as the upstream color screens |
+| O3 | Dashboard is the 240×320 layout, centred | **closed** (Phase 4) | Native 410×502 pages, #21–#29 |
+| O4 | Screen brightness and timeout controls, on-watch scan start/stop | **closed** (Phase 4) | #25–#27 |
 | O7 | Screen sleep doesn't wake for an incoming firmware update | known | While dark the screen task doesn't gather state, so the OTA progress screen first shows on the next touch or alert. The update itself is unaffected |
 | O8 | Battery charge state not shown | by design (D3) | The AXP2101 reports charging (`0x01` bits 7–5), but no existing `WD:` key or dashboard field carries it |
 | O5 | Sustained soak (≥30 min concurrent scan and render) | not run | acceptance check 6 in the analysis |
 | O6 | esp32c5 can't be built with the local IDF | upstream/toolchain | #3; needs the IDF release upstream uses |
+| O9 | Drawing a watch frame is slow on the chip | known, contained | HW-LOG: painting ~80–130 ms per dashboard frame (0.6 ms on a PC). Touch is followed between strips (#24), and the watch draws its data once a second (#29), so it costs ~10 % of one core. Alert frames run up to ~450 ms, so their blink is slower than the 250 ms design. Cause not pinned down (INFER: flash-cache misses on code and fonts) |
+| O10 | Long serial captures lose stretches of log | bench tooling | Captures of a minute or more sometimes stop receiving and deliver part of the backlog on the next open; the lost stretch is gone. Upstream logs through the ESP-IDF console when no USB session is open. Boot captures and short captures were reliable. Product behaviour is unaffected (the app path showed no gaps) |
+| O11 | A phone linked but not subscribed (Wardrive Go in the background) never starts the scan | upstream behaviour, now visible | HW-LOG: `phone connected` with no `notifications on` until the app was opened. The watch shows SCAN `WAITING` / `OPEN THE APP` for that state (#28) |
 
 ## Phase 2–3: battery, phone alerts, touch, screen sleep (2026-11-03)
 
@@ -75,3 +79,21 @@ Same watch, phone and toolchain as slice 1. Firmware: slice 1 plus this change.
 | 18 | Touch controller | pass | HW-LOG: `touch FT3x68: ready (id 03)` after the reset pulse (0x03 = FT3168 per Arduino_FT3x68.h) |
 | 19 | Screen sleep and wake on touch | pass | HW-LOG: `screen off (no touch for 30 s)` at 34.2 s, `screen on (touch at 153,466)` at 73.6 s. HW-EYE: went dark, a tap woke it |
 | 20 | Scanning and BLE keep going with the screen off | pass | HW-LOG: 86 BLE notifications in the 39.4 s dark vs 99 in 42.6 s lit (about 2.2/s both) |
+
+## Phase 4: the watch's own pages (2026-11-03)
+
+Same watch, phone and toolchain. Firmware: Phase 2–3 plus the native 410×502 pages.
+
+| # | Check | Result | Evidence |
+|---|---|---|---|
+| 21 | All chips build | pass | BUILD: esp32s3 0x149b10 (31 % free; watch fonts +114 KB, S3 only via `LCD_WATCH`), esp32c3 unchanged, esp32c6 +0x10, esp32c5 (CSI line removed) +0x820; warnings identical to untouched upstream on all four |
+| 22 | Host tests | pass | AUTO: `tools/netlog_test.c` (dedupe, eviction of the longest-unheard, newest-first, SSID limits, clock wrap) and `tools/gesture_test.c` (taps ignored, single hold, swipe thresholds and direction, moved finger never holds); 4 of 5 mutants caught, the fifth equivalent. Upstream `tools/apcount_test.c` unchanged |
+| 23 | Upstream screens unchanged | pass | AUTO: all 26 upstream 240×320 / 128×128 preview renders byte-identical before and after (including the `rrect` speed-up) |
+| 24 | Pages and swipes | pass | HW-LOG: `watch: page 0/1/2` on swipes. HW-EYE: first build "swipes unreliable" (frames took ~200 ms and the finger was only polled between frames); after polling between strips, "reliable now" |
+| 25 | Hold-to-press, accidental touches | pass | HW-LOG: `watch: brightness 25%` / `75%` / `100%`, `watch: screen off after … s`. HW-EYE: brightness, timeout and scan changed on a hold; taps and brushes changed nothing |
+| 26 | Brightness and timeout persist | pass | HW-EYE: the 15 s timeout set before a reflash still applied after it (screen off at 15 s in later logs) |
+| 27 | Scan pause / resume with the app | pass | HW-EYE: the app stopped with the watch, stayed stopped about 20 s, resumed on the watch's resume. HW-LOG: `watch: scan resumed`, `cmd: 'start'`, `stream started` (the pause lines fell in a lost log stretch, O10) |
+| 28 | Linked but app not listening | pass | HW-LOG: `phone connected` without `notifications on` until Wardrive Go was opened; then `MTU 247`, `notifications on`, `wdstream start`. The watch now labels that state `WAITING` instead of `PAUSED` |
+| 29 | Drawing cost | pass | HW-LOG (5 s windows, dashboard): before, 25 frames per 5 s at 126–134 ms painting each; after (data once a second, touches and alerts at once), 5 frames per 5 s at 81–131 ms; 0–1 ms state, 1–5 ms panel I/O, 2–3 ms touch; display task stack ≥ 1.7 KB left |
+| 30 | Panel corners | pass | HW-EYE: a calibration screen of nested outlines showed the visible area's corners at ~110 px radius (90 cut, 110 whole). The layout keeps clear of that curve (`W_CORNER_R`); "nothing cut off" on the watch |
+| 31 | Layout previews | pass | AUTO/visual: `docs/previews/*.png` rendered by `tools/lcd_preview.c -DLCD_WATCH=1` from the firmware's own drawing code |

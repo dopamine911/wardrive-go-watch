@@ -363,7 +363,7 @@ The only phone-originated data is alerts, `iam` and `time`.
 | R4 | Official tools overwrite any watch-specific image with the stock S3 image | web flasher: per-chip `BINS`, `eraseAll` (finding 0.9); README "updates install over Bluetooth"; app compares numeric versions (`:83-84`) | Until upstream ships the watch support, any flash or update from rocketgod.dev or the app removes it, whichever D1 option is chosen. (a) survives once upstream merges it; (b) never does |
 | R5 | Unknown `board_t` value 10 in advert extras | `PROTOCOL.md:55` lists 0–9 | No fault seen: the Android app links, streams and relinks with board 10 (`waveshare-verification.md` #7, #10). iOS untested |
 | R6 | Unknown `disp=410x502` | `send_caps_to` `:575-576` | Same as R5 |
-| R7 | "Scan start/stop" on the watch contradicts phone ownership | `scan_wanted()` `:256`; the app drives `wdstream` | Use the same `stop`/`start` paths; the app may re-issue `wdstream start`; or show it as a "pause" with a visible state |
+| R7 | "Scan start/stop" on the watch contradicts phone ownership | `scan_wanted()` `:256`; the app drives `wdstream` | Implemented as pause/resume through the same `stop`/`start` commands (user decision). **Checked 2026-11-03:** Wardrive Go (Android) stopped with the watch, stayed stopped, and resumed on the watch's resume (`waveshare-verification.md` #27) |
 | R8 | GPS probe on GPIO 4 corrupts the display bus | finding 0.4 | `board_pin_busy` |
 | R9 | Heap fragmentation from a per-channel `calloc` of up to 60 × `wifi_ap_record_t` | `:929` | Watch with `WD:HEALTH largest=` over a multi-hour run before changing upstream code |
 | R10 | QSPI sharing `SPI2_HOST` with SDSPI | `sdrun.c:137` | SD on `SPI3_HOST` or SDMMC; out of the first slice |

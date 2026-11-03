@@ -523,6 +523,12 @@ static char lower_hex_digit(uint8_t v) { return (char)(v < 10 ? '0' + v : 'a' + 
 
 static void sd_note_ap(const wifi_ap_record_t *ap, size_t ssid_len);   // the offline run (see "microSD")
 
+#if CONFIG_IDF_TARGET_ESP32S3
+// The watch's recent networks (its networks page): every WD:AP goes in, the screen task copies them out.
+static netlog_t s_netlog;
+static portMUX_TYPE s_netlog_lock = portMUX_INITIALIZER_UNLOCKED;
+#endif
+
 static void send_ap_line(const wifi_ap_record_t *ap) {
     size_t ssid_len = 0;
     while (ssid_len < sizeof(ap->ssid) && ap->ssid[ssid_len]) ssid_len++;
@@ -540,6 +546,14 @@ static void send_ap_line(const wifi_ap_record_t *ap) {
     apc_add(ap->bssid, (uint32_t)(esp_timer_get_time() / 1000));
     display_note_ap(ap->bssid, ap->primary);
     lcd_note_ap(ap->bssid, ap->primary);
+#if CONFIG_IDF_TARGET_ESP32S3
+    if (lcd_running()) {
+        taskENTER_CRITICAL(&s_netlog_lock);
+        netlog_note(&s_netlog, ap->bssid, ap->ssid, ssid_len, ap->rssi, ap->primary, auth_name(ap->authmode),
+                    (uint32_t)(esp_timer_get_time() / 1000));
+        taskEXIT_CRITICAL(&s_netlog_lock);
+    }
+#endif
     if (sdrun_active()) sd_note_ap(ap, ssid_len);
 }
 
@@ -3297,6 +3311,26 @@ static void lcd_fill(lcd_status_t *st) {
     st->sd_rows = sdrun_rows();
     sdx_fill(st);
     OTA_FILL(st);
+#if CONFIG_IDF_TARGET_ESP32S3
+    // The watch: its own counts, link and recent networks. This runs on the screen task only, so the link-edge state
+    // and the copy of the network list need no lock of their own.
+    static bool was_linked;
+    static uint32_t link_base;
+    static netlog_t nets;
+    bool linked = host_linked();
+    if (linked && !was_linked) link_base = st->aps_session;   // a host just linked: "this session" counts from here
+    was_linked = linked;
+    st->aps_link = linked && st->aps_session > link_base ? st->aps_session - link_base : 0;
+    st->scanning = s_streaming || s_bt_running || s_cap_running || s_csi_running;
+    st->can_scan = (st->ble && s_notify_enabled) || st->usb;
+    st->batt_mv = s_has_batt ? s_batt_mv : 0;
+    strlcpy(st->ble_name, s_name, sizeof(st->ble_name));
+    st->mtu = s_bt_up && st->ble ? ble_att_mtu(s_conn_handle) : 0;
+    taskENTER_CRITICAL(&s_netlog_lock);
+    nets = s_netlog;
+    taskEXIT_CRITICAL(&s_netlog_lock);
+    st->nets_n = (uint8_t)netlog_recent(&nets, st->nets, NETLOG_N);
+#endif
 }
 #endif
 
@@ -3309,6 +3343,10 @@ static void board_caps_set(const board_def_t *b) {
     }
     strlcpy(s_board_caps, caps, sizeof(s_board_caps));
 }
+
+#if CONFIG_IDF_TARGET_ESP32S3
+static void watch_scan_toggle(void);   // the watch's scan button (after run_command)
+#endif
 
 // Boot: the battery gauge (if any), the board's identity, and its LED ring when the identity names one.
 static void board_init(void) {
@@ -3365,6 +3403,7 @@ static void board_init(void) {
     if (s_board == BOARD_WAVESHARE_AMOLED_206) {
         watch_battery_init();
         if (watch_touch_init()) lcd_set_touch(watch_touch_read);
+        lcd_set_scan_toggle(watch_scan_toggle);
         if (lcd_open_amoled()) lcd_start(b->name, FW_VERSION, lcd_fill);
     }
 #endif
@@ -3768,6 +3807,15 @@ static void run_command(const uint8_t *text, size_t len, uint8_t src) {
     xSemaphoreGive(s_cmd_lock);
 }
 
+#if CONFIG_IDF_TARGET_ESP32S3
+/// The watch's scan button: exactly the `stop` / `start` the app itself sends (run like any command, under the command
+/// lock), so the board, the app and the log all see an ordinary stop or start. Called on the screen task.
+static void watch_scan_toggle(void) {
+    const char *c = (s_streaming || s_bt_running || s_cap_running || s_csi_running) ? "stop" : "start";
+    run_command((const uint8_t *)c, strlen(c), SINK_BLE);
+}
+
+#endif
 static void handle_command(const uint8_t *data, uint16_t len) {
     const uint8_t *text = data;
     uint16_t text_len = len;

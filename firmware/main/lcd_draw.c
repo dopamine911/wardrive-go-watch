@@ -1,6 +1,7 @@
 // WardriveESP — the color screens' scenes: boot splash (radar sweep), live dashboard, alert banner, firmware update,
-// offline runs going to the phone, each in a 240x320 and a compact 128x128 layout.
-// Anti-aliased text from lcd_fonts.h; everything is drawn per 16-row strip, clipped, straight into the wire buffer.
+// offline runs going to the phone, each in a 240x320 and a compact 128x128 layout; and on watch builds (LCD_WATCH) the
+// watch's own 410x502 pages. Anti-aliased text from lcd_fonts.h (lcd_fonts_watch.h for the watch); everything is drawn
+// per 16-row strip, clipped, straight into the wire buffer.
 // SPDX-License-Identifier: MIT
 
 #include <stdio.h>
@@ -8,6 +9,12 @@
 #include "lcd_draw.h"
 #include "lcd_fonts.h"
 #include "lcd_sprites.h"
+#ifndef LCD_WATCH
+#define LCD_WATCH 0   // set for builds that can run the watch's 410x502 screen (ESP32-S3), and for the bench preview
+#endif
+#if LCD_WATCH
+#include "lcd_fonts_watch.h"
+#endif
 
 #define W  s_w
 #define H  s_h
@@ -111,11 +118,24 @@ static int rr_cov(int i, int j, int x, int y, int w, int h, int r) {
 }
 static void rrect(int x, int y, int w, int h, int r, uint16_t c, int a) {
     int ya = y < s_y0 ? s_y0 : y, yb = y + h > s_y0 + SH ? s_y0 + SH : y + h;
-    for (int j = ya; j < yb; j++)
-        for (int i = x; i < x + w; i++) {
-            int cov = rr_cov(i, j, x, y, w, h, r);
-            if (cov) blend(i, j, c, cov * a / 16);
-        }
+    if (2 * r > w || 2 * r > h) {   // corners overlapping: every pixel through the coverage test
+        for (int j = ya; j < yb; j++)
+            for (int i = x; i < x + w; i++) {
+                int cov = rr_cov(i, j, x, y, w, h, r);
+                if (cov) blend(i, j, c, cov * a / 16);
+            }
+        return;
+    }
+    // Only the corners need the coverage test; everything else is fully covered, so a straight span (same pixels as
+    // blending each at full coverage, without the per-pixel test).
+    for (int j = ya; j < yb; j++) {
+        bool band = j < y + r || j >= y + h - r;
+        int ia = band ? x + r : x, ib = band ? x + w - r : x + w;
+        for (int i = x; i < ia; i++) { int cov = rr_cov(i, j, x, y, w, h, r); if (cov) blend(i, j, c, cov * a / 16); }
+        if (a >= 16) fill(ia, j, ib - ia, 1, c);
+        else for (int i = ia; i < ib; i++) blend(i, j, c, a);
+        for (int i = ib; i < x + w; i++) { int cov = rr_cov(i, j, x, y, w, h, r); if (cov) blend(i, j, c, cov * a / 16); }
+    }
 }
 static void rrect_line(int x, int y, int w, int h, int r, int t, uint16_t c, int a) {
     int ya = y < s_y0 ? s_y0 : y, yb = y + h > s_y0 + SH ? s_y0 + SH : y + h;
@@ -977,6 +997,369 @@ static void mini_sd_sent(const lcd_frame_t *f) {
     sent_summary(f, 121);
 }
 
+#if LCD_WATCH
+// ── the watch (410x502): black for the AMOLED, a faint terminal grid, big type for reading on a wrist ──
+// The panel's visible area has rounded corners of about 110 px radius (bench 2026-11-03: of nested outlines 2 px from the
+// edge, 90 px corners were cut off and 110 px ones whole). Anything within 110 px of a corner sits inside that curve.
+#define W_CORNER_R 110
+#define W_HEAD_X 46              // header: at the header's height the corner curve reaches ~37 px in
+#define WM 24                    // side margin, everywhere at least ~55 px from the top and bottom edges
+#define W_HEAD 60                // header height
+#define W_DOTS_Y 490             // page dots
+#define W_TILE_W 173
+#define W_TILE_H 70
+#define W_BTN_X WM
+#define W_BTN_Y0 104
+#define W_BTN_H 60
+#define W_BTN_GAP 8
+#define W_ROW_Y0 104             // networks page: first row, row pitch, row height
+#define W_ROW_PITCH 70
+#define W_ROW_H 64
+#define W_ROW_M 16               // networks page rows: side margin (the last row ends ~54 px from the bottom)
+
+static void w_background(void) {
+    fill(0, s_y0, W, SH, C_BLACK);
+    for (int y = 12; y < H; y += 24) {
+        if (y < s_y0 || y >= s_y0 + SH) continue;
+        for (int x = 12; x < W; x += 24) blend(x, y, C_FAINT, 5);
+    }
+}
+
+/// `s` cut with "..." to fit `maxw` in font `fn`, into `out` (n >= 4).
+static void w_fit(const lcd_font_t *fn, const char *s, int maxw, char *out, size_t n) {
+    snprintf(out, n, "%s", s);
+    for (size_t k = strlen(out); k > 0 && text_w(fn, out, 0) > maxw; k--)
+        if (k + 3 < n) memcpy(out + k - 1, "...", 4);   // the first k - 1 characters, then "..."
+}
+
+// A halo in four directions: on black it reads like glow()'s twelve, at a third of the cost (the big digits are most of
+// a watch frame's drawing).
+static void w_glow(const lcd_font_t *f, int x, int base, const char *s, int sp, uint16_t c, int a) {
+    static const int8_t D[][2] = { {-2,0},{2,0},{0,-2},{0,2} };
+    for (size_t i = 0; i < sizeof(D) / sizeof(D[0]); i++) text_ex(f, x + D[i][0], base + D[i][1], s, sp, c, c, SOLID, a);
+}
+
+static void w_header(const lcd_frame_t *f) {
+    fill(0, 0, W, W_HEAD, C_BLACK);
+    text_ex(&wfont_head, W_HEAD_X, 50, "WARDRIVE", 1, C_CYAN, C_MAG, HORIZ, 16);
+    int pct = f->st.batt_pct;
+    if (pct >= 0) {   // battery: a cell with its level, the percent beside it
+        if (pct > 100) pct = 100;
+        uint16_t c = pct > 40 ? C_GREEN : pct > 15 ? C_AMBER : C_RED;
+        int bx = W - W_HEAD_X - 50, by = 26;
+        rrect_line(bx, by, 46, 24, 5, 2, C_DIM, 16);
+        rrect(bx + 46, by + 7, 4, 10, 2, C_DIM, 16);
+        int lw = 38 * pct / 100;
+        if (lw > 0) rrect(bx + 4, by + 4, lw, 16, 3, c, 14);
+        char b[8];
+        snprintf(b, sizeof(b), "%d%%", pct);
+        text_r(&wfont_label, bx - 8, 46, b, c);
+    }
+    hgrad(0, W_HEAD - 3, W, 2, C_CYAN, C_MAG);
+}
+
+static void w_dots(const lcd_frame_t *f) {
+    for (int p = 0; p < LCD_PAGES; p++) {
+        int cx = W / 2 + (p - 1) * 24;
+        if (p == f->page) circle(cx, W_DOTS_Y, 6, 0, C_CYAN, 16);
+        else circle(cx, W_DOTS_Y, 5, 2, C_EDGE, 16);
+    }
+}
+
+static uint16_t w_link_color(const lcd_status_t *st) { return st->usb ? C_GREEN : st->ble ? C_CYAN : C_AMBER; }
+
+static void w_clock(char *b, size_t n, uint32_t s) {
+    if (s < 3600) snprintf(b, n, "%lu:%02lu", (unsigned long)(s / 60), (unsigned long)(s % 60));
+    else snprintf(b, n, "%luh%02lu", (unsigned long)(s / 3600), (unsigned long)((s / 60) % 60));
+}
+
+static void w_status(const lcd_frame_t *f) {
+    const lcd_status_t *st = &f->st;
+    uint16_t c = w_link_color(st);
+    bool linked = st->usb || st->ble;
+    rrect(WM, 68, W - 2 * WM, 46, 23, c, 3);
+    rrect_line(WM, 68, W - 2 * WM, 46, 23, 2, c, 10);
+    int pulse = linked ? 16 : (int)((f->now / 90) % 16);
+    if (!linked && pulse > 8) pulse = 16 - pulse;
+    circle(WM + 24, 91, 11, 0, c, linked ? 4 : pulse / 2);
+    circle(WM + 24, 91, 6, 0, c, linked ? 16 : 8 + pulse);
+    char clk[12];
+    w_clock(clk, sizeof(clk), (f->now - f->t0) / 1000);
+    int cx = W - WM - 18 - text_w(&wfont_label, clk, 0);
+    text(&wfont_label, cx, 99, clk, C_DIM);
+    const char *what = st->usb ? "USB" : st->ble ? "BLE" : "NO PHONE";
+    int tx = WM + 44;
+    text_ex(&wfont_body, tx, 101, what, 1, c, c, SOLID, 16);
+    if (linked && st->holder[0]) {
+        char h[24];
+        int hx = tx + text_w(&wfont_body, what, 1) + 10;
+        w_fit(&wfont_body, st->holder, cx - 12 - hx, h, sizeof(h));
+        text(&wfont_body, hx, 101, h, C_WHITE);
+    }
+}
+
+static void w_tile(int x, int y, const char *label, const char *value, const char *unit, uint16_t accent, uint16_t vc) {
+    rrect(x, y, W_TILE_W, W_TILE_H, 12, C_PANEL, 16);
+    rrect_line(x, y, W_TILE_W, W_TILE_H, 12, 1, C_EDGE, 16);
+    rrect(x + 6, y + 12, 4, W_TILE_H - 24, 2, accent, 16);
+    text_ex(&wfont_label, x + 18, y + 25, label, 0, C_DIM, C_DIM, SOLID, 16);
+    text(&wfont_value, x + 18, y + 62, value, vc);
+    if (unit && *unit) text(&wfont_label, x + 24 + text_w(&wfont_value, value, 0), y + 60, unit, accent);
+}
+
+// 2.4 GHz channel activity under the count, the channel being scanned in yellow (the watch's radio has no 5 GHz).
+static void w_spectrum(const lcd_frame_t *f, int base, int top) {
+    const int n = 13, gap = 5, bw = (W - 2 * WM - (n - 1) * gap) / n;
+    for (int i = 0; i < n; i++) {
+        int x = WM + i * (bw + gap), h = f->act[i] * top / 250;
+        if (i == f->cur) {
+            if (h < 6) h = 6;
+            vgrad(x, base - h, bw, h, C_YEL, C_AMBER);
+            fill_a(x - 1, base - h - 2, bw + 2, h + 2, C_YEL, 3);
+        } else if (f->act[i] < 6) {
+            fill(x, base - 3, bw, 3, C_FAINT);
+        } else {
+            for (int y = 0; y < h; y++) fill(x, base - 1 - y, bw, 1, mix(C_TEAL, C_MAG, y, top));
+        }
+    }
+}
+
+static void w_dashboard(const lcd_frame_t *f) {
+    const lcd_status_t *st = &f->st;
+    w_background();
+    w_header(f);
+    w_status(f);
+    // In range now, big, with the "+N new in the last 10 s" pill on the right.
+    fill(WM, 132, 4, 20, C_CYAN);
+    text_ex(&wfont_label, WM + 12, 150, "IN RANGE NOW", 1, C_DIM, C_DIM, SOLID, 16);
+    char b[24];
+    if (f->fresh) {
+        snprintf(b, sizeof(b), "+%lu", (unsigned long)f->fresh);
+        int pw = text_w(&wfont_title, b, 1) + 20;
+        rrect(W - WM - pw, 128, pw, 28, 14, C_GREEN, 4);
+        rrect_line(W - WM - pw, 128, pw, 28, 14, 2, C_GREEN, 14);
+        text_ex(&wfont_title, W - WM - pw + 10, 151, b, 1, C_GREEN, C_GREEN, SOLID, 16);
+    }
+    snprintf(b, sizeof(b), "%lu", (unsigned long)f->live);
+    const lcd_font_t *nf = text_w(&wfont_huge, b, 3) <= W - 2 * WM ? &wfont_huge : &wfont_big;
+    int base = nf == &wfont_huge ? 248 : 236;
+    w_glow(nf, WM, base, b, 3, C_TEAL, 6);
+    text_ex(nf, WM, base, b, 3, C_WHITE, C_CYAN, VERT, 16);
+    w_spectrum(f, 292, 30);
+    // Counts this watch measured itself (the app sends none back), the channel and the scan.
+    const int x1 = WM, x2 = W - WM - W_TILE_W, y1 = 300, y2 = 376;
+    snprintf(b, sizeof(b), "%lu", (unsigned long)f->session);
+    w_tile(x1, y1, "SINCE BOOT", b, NULL, C_CYAN, C_WHITE);
+    if (st->usb || st->ble) snprintf(b, sizeof(b), "%lu", (unsigned long)st->aps_link);
+    else snprintf(b, sizeof(b), "--");
+    w_tile(x2, y1, "THIS SESSION", b, NULL, C_GREEN, C_WHITE);
+    if (st->channel) snprintf(b, sizeof(b), "%u", st->channel);
+    else snprintf(b, sizeof(b), "--");
+    w_tile(x1, y2, "CHANNEL", b, st->channel ? "2.4 GHz" : NULL, C_YEL, C_WHITE);
+    bool linked = st->usb || st->ble;   // linked but not listening: the phone's app isn't open (or hasn't subscribed)
+    const char *scan = st->scanning ? "ON" : st->can_scan ? "PAUSED" : linked ? "WAITING" : "OFF";
+    uint16_t sc = st->scanning ? C_GREEN : st->can_scan || linked ? C_AMBER : C_DIM;
+    char lab[20];
+    snprintf(lab, sizeof(lab), "SCAN %s", st->mode[0] ? st->mode : "");
+    w_tile(x2, y2, lab, scan, NULL, sc, sc);
+    if (st->scanning) {   // activity: a dot running round the scan tile's corner
+        int ph = (int)((f->now / 120) % 8);
+        for (int k = 0; k < 3; k++) circle(x2 + W_TILE_W - 22 + k * 7, y2 + 54, 3, 0, C_GREEN, ph % 3 == k ? 16 : 4);
+    }
+    text_ex(&wfont_label, (W - text_w(&wfont_label, "COUNTED ON THIS WATCH", 1)) / 2, 472, "COUNTED ON THIS WATCH", 1,
+            C_FAINT, C_FAINT, SOLID, 16);
+    w_dots(f);
+}
+
+static void w_title(const char *title, const char *right) {
+    text_ex(&wfont_title, WM, 92, title, 2, C_CYAN, C_MAG, HORIZ, 16);
+    if (right && *right) text_r(&wfont_label, W - WM, 92, right, C_DIM);
+}
+
+static uint16_t w_auth_color(const char *auth) {
+    if (!auth || !strcmp(auth, "OPEN")) return C_RED;
+    if (!strcmp(auth, "WEP") || !strcmp(auth, "WPA")) return C_AMBER;
+    if (!strcmp(auth, "UNKNOWN")) return C_DIM;
+    return C_GREEN;
+}
+
+static void w_networks(const lcd_frame_t *f) {
+    const lcd_status_t *st = &f->st;
+    w_background();
+    w_header(f);
+    char b[40];
+    int first = f->net_first < st->nets_n ? f->net_first : 0;
+    int last = first + LCD_NETS_ROWS < st->nets_n ? first + LCD_NETS_ROWS : st->nets_n;
+    if (st->nets_n > LCD_NETS_ROWS) snprintf(b, sizeof(b), "%d-%d OF %u", first + 1, last, st->nets_n);
+    else snprintf(b, sizeof(b), "%u RECENT", st->nets_n);
+    w_title("NETWORKS", st->nets_n ? b : "");
+    if (!st->nets_n) {
+        const char *a = "NO NETWORKS YET", *c = (st->usb || st->ble) ? "scanning..." : "shown once Wardrive Go links";
+        text_ex(&wfont_title, (W - text_w(&wfont_title, a, 2)) / 2, 260, a, 2, C_DIM, C_DIM, SOLID, 16);
+        text(&wfont_label, (W - text_w(&wfont_label, c, 0)) / 2, 296, c, C_FAINT);
+        w_dots(f);
+        return;
+    }
+    for (int i = first; i < last; i++) {
+        const netlog_rec_t *r = &st->nets[i];
+        int y = W_ROW_Y0 + (i - first) * W_ROW_PITCH;
+        if (y + W_ROW_H <= s_y0 || y >= s_y0 + SH) continue;
+        uint16_t ac = w_auth_color(r->auth);
+        const int rl = W_ROW_M + 14, rr = W - W_ROW_M - 12;
+        rrect(W_ROW_M, y, W - 2 * W_ROW_M, W_ROW_H, 10, C_PANEL, 16);
+        rrect(W_ROW_M + 5, y + 10, 4, W_ROW_H - 20, 2, ac, 16);
+        // RSSI on the right of the first line, colored by strength
+        uint16_t rc = r->rssi > -60 ? C_GREEN : r->rssi > -75 ? C_YEL : C_AMBER;
+        snprintf(b, sizeof(b), "%d", r->rssi);
+        int dbw = text_w(&wfont_label, "dBm", 0), rx = rr - dbw - 4 - text_w(&wfont_body, b, 0);
+        text(&wfont_body, rx, y + 30, b, rc);
+        text(&wfont_label, rr - dbw, y + 29, "dBm", C_DIM);
+        // SSID: printable ASCII as is, each other character (a UTF-8 sequence counts once) as '?' (the fonts are ASCII);
+        // hidden ones say so
+        char ssid[33];
+        size_t k = 0;
+        for (size_t j = 0; j < r->ssid_len && j < 32; j++) {
+            uint8_t c = (uint8_t)r->ssid[j];
+            if ((c & 0xC0) == 0x80) continue;   // UTF-8 continuation byte
+            ssid[k++] = (c >= 32 && c < 127) ? (char)c : '?';
+        }
+        ssid[k] = '\0';
+        char fit[40];
+        w_fit(&wfont_body, r->ssid_len ? ssid : "<hidden>", rx - 12 - rl, fit, sizeof(fit));
+        text(&wfont_body, rl, y + 30, fit, r->ssid_len ? C_WHITE : C_DIM);
+        // second line: BSSID, then channel and security
+        const uint8_t *m = r->bssid;
+        snprintf(b, sizeof(b), "%02X:%02X:%02X:%02X:%02X:%02X", m[0], m[1], m[2], m[3], m[4], m[5]);
+        text(&wfont_label, rl, y + 56, b, C_DIM);
+        const char *auth = r->auth ? (!strcmp(r->auth, "WPA2_WPA3") ? "WPA2/3" : r->auth) : "?";
+        int aw = text_w(&wfont_label, auth, 0);
+        text(&wfont_label, rr - aw, y + 56, auth, ac);
+        snprintf(b, sizeof(b), "ch%u", r->ch);
+        text(&wfont_label, rr - aw - 10 - text_w(&wfont_label, b, 0), y + 56, b, C_YEL);
+    }
+    if (st->nets_n > LCD_NETS_ROWS)
+        text_ex(&wfont_label, (W - text_w(&wfont_label, "SWIPE UP / DOWN", 1)) / 2, 472, "SWIPE UP / DOWN", 1, C_FAINT,
+                C_FAINT, SOLID, 16);
+    w_dots(f);
+}
+
+int lcd_watch_button_at(int x, int y) {
+    if (x < W_BTN_X || x >= LCD_W - W_BTN_X) return LCD_BTN_NONE;
+    for (int b = 0; b < LCD_BTNS; b++) {
+        int by = W_BTN_Y0 + b * (W_BTN_H + W_BTN_GAP);
+        if (y >= by && y < by + W_BTN_H) return b;
+    }
+    return LCD_BTN_NONE;
+}
+
+static void w_button(const lcd_frame_t *f, int b, const char *label, const char *value, uint16_t vc, bool enabled) {
+    int y = W_BTN_Y0 + b * (W_BTN_H + W_BTN_GAP), w = W - 2 * W_BTN_X;
+    bool held = f->hold_btn == b;
+    uint16_t edge = !enabled ? C_EDGE : held ? C_CYAN : C_EDGE;
+    rrect(W_BTN_X, y, w, W_BTN_H, 14, C_PANEL, 16);
+    if (held && enabled && f->hold_pct) rrect(W_BTN_X, y, w * f->hold_pct / 100, W_BTN_H, 14, C_CYAN, 5);
+    rrect_line(W_BTN_X, y, w, W_BTN_H, 14, held ? 2 : 1, edge, 16);
+    text_ex(&wfont_title, W_BTN_X + 18, y + 39, label, 1, enabled ? C_WHITE : C_DIM, enabled ? C_WHITE : C_DIM, SOLID, 16);
+    text_r(&wfont_body, W - W_BTN_X - 18, y + 41, value, enabled ? vc : C_DIM);
+}
+
+static void w_info(int y, const char *label, const char *value) {
+    text(&wfont_label, WM, y, label, C_DIM);
+    char fit[40];
+    w_fit(&wfont_label, value, W - 2 * WM - 120, fit, sizeof(fit));
+    text_r(&wfont_label, W - WM, y, fit, C_WHITE);
+}
+
+static void w_controls(const lcd_frame_t *f) {
+    const lcd_status_t *st = &f->st;
+    w_background();
+    w_header(f);
+    w_title("CONTROLS", "HOLD TO CHANGE");
+    char b[40];
+    const char *sv = st->scanning ? "RUNNING" : st->can_scan ? "PAUSED" : (st->usb || st->ble) ? "OPEN THE APP" : "NEEDS PHONE";
+    w_button(f, LCD_BTN_SCAN, "SCAN", sv, st->scanning ? C_GREEN : C_AMBER, st->scanning || st->can_scan);
+    snprintf(b, sizeof(b), "%u%%", f->bright_pct);
+    w_button(f, LCD_BTN_BRIGHT, "BRIGHTNESS", b, C_CYAN, true);
+    snprintf(b, sizeof(b), "%u s", f->sleep_s);
+    w_button(f, LCD_BTN_SLEEP, "SCREEN OFF", b, C_CYAN, true);
+    hgrad(WM, 318, W - 2 * WM, 1, C_EDGE, C_EDGE);
+    w_info(348, "BLE", st->ble_name[0] ? st->ble_name : "--");
+    if (st->usb) snprintf(b, sizeof(b), "USB host");
+    else if (st->ble) snprintf(b, sizeof(b), "%s  MTU %u", st->holder[0] ? st->holder : "phone", st->mtu);
+    else snprintf(b, sizeof(b), "advertising");
+    w_info(378, "LINK", b);
+    if (st->batt_pct >= 0) snprintf(b, sizeof(b), "%d%%  %d.%02d V", st->batt_pct, st->batt_mv / 1000, st->batt_mv % 1000 / 10);
+    else snprintf(b, sizeof(b), "--");
+    w_info(408, "BATTERY", b);
+    char up[12], ver[40];
+    w_clock(up, sizeof(up), (f->now - f->t0) / 1000);
+    snprintf(ver, sizeof(ver), "%s  up %s", f->version, up);   // one row: an uptime row would sit inside the corner curve
+    w_info(438, "FIRMWARE", ver);
+    w_dots(f);
+}
+
+static void w_alert(const lcd_frame_t *f) {
+    uint16_t c, dark;
+    alert_colors(f, &c, &dark);
+    bool lit = f->alert_on || f->alert_police;
+    uint16_t fg = lit ? C_WHITE : c;
+    if (lit) vgrad(0, s_y0, W, SH, mix(c, dark, s_y0, H), mix(c, dark, s_y0 + SH - 1, H));
+    else { w_background(); vgrad(0, s_y0, W, SH, mix(dark, C_BLACK, s_y0, H), mix(dark, C_BLACK, s_y0 + SH - 1, H)); }
+    rrect_line(6, 6, W - 12, H - 12, W_CORNER_R - 4, 4, fg, 16);   // follows the panel's own corners
+    warn_triangle(W / 2, 92, 150, 86, fg, lit ? c : C_BLACK);
+    const lcd_font_t *lf = text_w(&wfont_head, f->alert, 2) <= W - 48 ? &wfont_head : &wfont_title;
+    text_ex(lf, (W - text_w(lf, f->alert, 2)) / 2, 312, f->alert, 2, fg, fg, SOLID, 16);
+    text_ex(&wfont_label, (W - text_w(&wfont_label, "ALERT FROM THE APP", 1)) / 2, 356, "ALERT FROM THE APP", 1, fg, fg,
+            SOLID, 10);
+}
+
+static void w_update(const lcd_frame_t *f) {
+    const lcd_status_t *st = &f->st;
+    w_background();
+    w_header(f);
+    const char *title = st->ota_installing ? "INSTALLING" : "FIRMWARE UPDATE";
+    text_ex(&wfont_title, (W - text_w(&wfont_title, title, 2)) / 2, 108, title, 2, C_CYAN, C_MAG, HORIZ, 16);
+    const int cx = W / 2, cy = 252, r = 110, th = 16;
+    update_ring(f, cx, cy, r, th, 10, true);
+    update_pct(f, &wfont_huge, &wfont_big, &wfont_head, cx, cy + 34, 2 * (r - th - 5 - 2 - 6));
+    char b[32];
+    if (st->ota_installing) snprintf(b, sizeof(b), "CHECKING THE IMAGE");
+    else snprintf(b, sizeof(b), "%lu / %lu KB", (unsigned long)st->ota_kb, (unsigned long)st->ota_total_kb);
+    text_ex(&wfont_label, (W - text_w(&wfont_label, b, 1)) / 2, 404, b, 1, C_DIM, C_DIM, SOLID, 16);
+    update_warning(f, &wfont_title, 444);
+    update_stream(f, 462, W_HEAD_X, W - W_HEAD_X, 6);
+}
+
+static void w_splash(const lcd_frame_t *f) {
+    w_background();
+    const int cx = W / 2, cy = 196;
+    for (int r = 46; r <= 138; r += 46) circle(cx, cy, r, 2, C_TEAL, 12);
+    fill_a(cx - 140, cy, 280, 1, C_TEAL, 8);
+    fill_a(cx, cy - 140, 1, 280, C_TEAL, 8);
+    sweep(cx, cy, 138, f->now - f->t0);
+    circle(cx, cy, 6, 0, C_WHITE, 16);
+    int hw = text_w(&wfont_head, "WARDRIVE", 4);
+    w_glow(&wfont_head, (W - hw) / 2, 392, "WARDRIVE", 4, C_TEAL, 4);
+    text_ex(&wfont_head, (W - hw) / 2, 392, "WARDRIVE", 4, C_CYAN, C_MAG, HORIZ, 16);
+    int pw = text_w(&wfont_title, "ESP", 0) + 14;
+    rrect((W - pw) / 2, 408, pw, 30, 7, C_CYAN, 16);
+    text(&wfont_title, (W - pw) / 2 + 7, 432, "ESP", C_BLACK);
+    char b[48];
+    snprintf(b, sizeof(b), "%s  %s", f->board, f->version);
+    text(&wfont_label, (W - text_w(&wfont_label, b, 0)) / 2, 476, b, C_DIM);
+}
+
+static void watch_scene(const lcd_frame_t *f) {
+    if (f->st.ota) w_update(f);
+    else if (f->alerting && is_toy(f->alert)) toy_alert(f);
+    else if (f->alerting) w_alert(f);
+    else if (f->now - f->t0 < 2200) w_splash(f);
+    else if (f->page == LCD_PAGE_NETS) w_networks(f);
+    else if (f->page == LCD_PAGE_CTRL) w_controls(f);
+    else w_dashboard(f);
+}
+#endif
+
 // ── public ──
 int lcd_act_index(uint8_t ch) {
     if (ch >= 1 && ch <= 14) return ch - 1;
@@ -991,6 +1374,9 @@ void lcd_draw_strip(uint16_t *strip, int y0, const lcd_frame_t *f) {
     s_y0 = y0;
     s_w = f->w;
     s_h = f->h;
+#if LCD_WATCH
+    if (s_w > 300) { watch_scene(f); return; }
+#endif
     bool mini = s_w < 200;
     if (f->st.ota) mini ? mini_update(f) : update_scene(f);
     else if (f->alerting && is_toy(f->alert)) toy_alert(f);

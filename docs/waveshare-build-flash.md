@@ -21,7 +21,7 @@ idf.py -B build-esp32s3 -D SDKCONFIG=build-esp32s3/sdkconfig build
 ```
 
 Expected:
-- `wardrive_bridge.bin binary size 0x12ac10 bytes … (38%) free`.
+- `wardrive_bridge.bin binary size 0x149b10 bytes … (31%) free`.
 - The same three `-Wunused-function` warnings the untouched upstream source has: `display.c text_c`,
   `wardrive_bridge.c led_apply`, `board_is_awok`.
 
@@ -81,6 +81,32 @@ done
 `esp32c5` does not build on IDF v5.5.2, and the untouched upstream source fails the same way:
 `wifi_csi_config_t has no member named 'lltf_bit_mode'` (`wardrive_bridge.c`, CSI setup). Upstream builds with a
 newer IDF. See `waveshare-verification.md`.
+
+## Host tests and layout previews (no hardware)
+
+The hardware-independent pieces build and run with the system compiler, from `firmware/`:
+
+```sh
+cc -O2 -Wall -Wextra -I main tools/netlog_test.c main/netlog.c -o /tmp/netlog_test && /tmp/netlog_test
+cc -O2 -Wall -Wextra -I main tools/gesture_test.c main/gesture.c -o /tmp/gesture_test && /tmp/gesture_test
+cc -O2 -I main tools/apcount_test.c main/apcount.c -o /tmp/apcount_test -lm && /tmp/apcount_test   # upstream's
+```
+
+The first two print `all checks passed` and exit 0, or name each failed check and exit 1.
+
+The screens render to PPM images with the firmware's own drawing code; `-DLCD_WATCH=1` adds the watch's pages
+(`w*-410x502.ppm`, PNG copies in `docs/previews/`):
+
+```sh
+cc -O2 -DLCD_WATCH=1 -I main tools/lcd_preview.c main/lcd_draw.c -o /tmp/lcd_preview && /tmp/lcd_preview /tmp/out
+```
+
+## Watch fonts
+
+`main/lcd_fonts_watch.h` comes from `tools/fonts/gen.py <font dir> main/lcd_fonts_watch.h watch` (needs Pillow, plus
+`Orbitron[wght].ttf`, `Rajdhani-Bold.ttf` and `ShareTechMono-Regular.ttf` from github.com/google/fonts `ofl/`). Leave
+`main/lcd_fonts.h` alone: today's font files and Pillow don't reproduce it byte for byte, so regenerating it would
+shift the other boards' screens.
 
 ## Updates from the app
 
