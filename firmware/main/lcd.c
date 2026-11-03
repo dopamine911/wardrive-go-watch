@@ -53,6 +53,7 @@ static const char *TAG = "WardriveESP";
 #define BL_LEVEL(pct) ((pct) * 255 / 100)
 // Touch screens (the watch): its loop and its drawing pace.
 #define TOUCH_POLL_MS 20                   // touch polling while the panel is lit (and between strips of a frame)
+#define DARK_POLL_MS  50                   // while it is dark: the wake touch and the BOOT button
 #define HOLD_FRAME_MS 50                   // redraws while a button fills under a held finger
 #define DIAG_MS       60000                // the screen's own numbers in the log this often
 #define ANIM_STEP_MS  1000                 // the watch's idle animations (pulses, scan dots) step once a second
@@ -597,6 +598,31 @@ static bool watch_input(bool down, int x, int y, uint32_t now) {
     return g == GEST_HOLD || s_page != was_page || s_net_first != was_first || s_hold_btn != was_btn ||
            s_hold_pct != was_pct;
 }
+
+// The board's BOOT button (GPIO 0, pulled up on the board, pressed = low: Waveshare 04_Immersive_block main.c:385 and
+// Gravitysphere.cpp:397 read it that way). A press moves the board to its next scan mode, like the MODE button, and
+// wakes the panel so the new mode shows.
+#define BOOT_BTN_GPIO 0
+#define BOOT_BTN_DEBOUNCE_MS 30
+static void boot_button_init(void) {
+    gpio_config_t io = { .pin_bit_mask = 1ULL << BOOT_BTN_GPIO, .mode = GPIO_MODE_INPUT, .pull_up_en = GPIO_PULLUP_ENABLE };
+    gpio_config(&io);
+}
+
+static void boot_button_tick(uint32_t now) {
+    static bool released;      // seen high since the last press (a button held down at boot never fires)
+    static bool low;           // reading low now
+    static uint32_t low_at;    // since when
+    if (gpio_get_level(BOOT_BTN_GPIO)) { released = true; low = false; return; }
+    if (!low) { low = true; low_at = now; return; }
+    if (!released || now - low_at < BOOT_BTN_DEBOUNCE_MS) return;
+    released = false;
+    s_touch_at = now;          // counts as a touch: wakes the panel, restarts the screen-off timer
+    if (!s_scan || !s_frame.st.can_scan) { ESP_LOGI(TAG, "watch: BOOT pressed, no host listening"); return; }
+    ESP_LOGI(TAG, "watch: BOOT, mode after %s", s_frame.st.mode);
+    s_scan(LCD_SCAN_NEXT_MODE);
+    s_redraw = true;
+}
 #endif
 
 // The finger, polled at most every TOUCH_POLL_MS: from the task loop and between strips while a frame draws, so a swipe
@@ -607,6 +633,7 @@ static void touch_tick(uint32_t now) {
     s_down = s_touch(&s_tx, &s_ty);
     if (s_down) s_touch_at = now;
 #if CONFIG_IDF_TARGET_ESP32S3
+    boot_button_tick(now);
     if (!s_dark && watch_input(s_down, s_tx, s_ty, now)) s_redraw = true;
 #endif
 }
@@ -643,7 +670,7 @@ static void lcd_task(void *arg) {
                 else ESP_LOGI(TAG, "lcd: screen on (alert)");
             }
         }
-        if (dark) { vTaskDelay(pdMS_TO_TICKS(FRAME_MS)); continue; }
+        if (dark) { vTaskDelay(pdMS_TO_TICKS(s_touch ? DARK_POLL_MS : FRAME_MS)); continue; }   // the finger and BOOT still polled
 
         bool dirty = s_redraw, holding = false;
         s_redraw = false;
@@ -714,7 +741,7 @@ void lcd_start(const char *board, const char *version, lcd_fill_fn fill_fn) {
         if (in->ms) vTaskDelay(pdMS_TO_TICKS(in->ms));
     }
 #if CONFIG_IDF_TARGET_ESP32S3
-    if (s_touch) settings_load();
+    if (s_touch) { settings_load(); boot_button_init(); }
 #endif
     s_t0 = now_ms();
     gather(&s_frame, s_t0);

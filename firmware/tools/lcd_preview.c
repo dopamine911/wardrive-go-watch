@@ -81,7 +81,20 @@ static void watch_scenes(const char *dir, lcd_frame_t *f) {
     f->session = 187;
     f->fresh = 3;
     st->aps_link = 64;
+    f->page = LCD_PAGE_DASH;
     save_watch(dir, "w2-dashboard", f);
+
+    // The clock page: a plain watch face (local time Tue 3 Nov 2026, 1:34 PM), with the mode's counter
+    f->page = LCD_PAGE_CLOCK;
+    st->wall_ok = true;
+    st->wall_hour = 13; st->wall_min = 34; st->wall_wday = 2; st->wall_mday = 3; st->wall_mon = 11; st->wall_year = 2026;
+    save_watch(dir, "w14-clock", f);
+    st->wall_hour = 0; st->wall_min = 5; st->wall_mday = 21; st->wall_mon = 12; st->wall_wday = 1;
+    strcpy(st->mode, "BT"); st->bt_devices = 37; st->batt_pct = 12;
+    save_watch(dir, "w15-clock-bt-midnight", f);
+    st->wall_ok = false; st->scanning = false; strcpy(st->mode, "WIFI"); st->batt_pct = 82;
+    save_watch(dir, "w16-clock-no-time", f);
+    st->scanning = true;
 
     net(st, 1, "dragino-3296cc", -67, 11, "WPA2");
     net(st, 2, "RT-AC66U_B1_A8_2G", -78, 11, "WPA2");

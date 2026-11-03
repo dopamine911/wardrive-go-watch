@@ -322,7 +322,8 @@ All of the following are from `ref/ESP32-S3-Touch-AMOLED-2.06` and checked by gr
 | Firmware info | `FW_VERSION`, `esp_ota_get_running_partition` | local |
 | Phone alerts | `led alert …` → `lcd_alert` | exists; S3 guard must open (finding 0.3) |
 
-The only phone-originated data is alerts, `iam` and `time`.
+The only phone-originated data is alerts and `iam`. The protocol has a `time` command, but Wardrive Go doesn't send it
+(observed 2026-11-03, verification O13).
 
 ## 5. Proposed modifications (minimal; awaiting D1–D4)
 

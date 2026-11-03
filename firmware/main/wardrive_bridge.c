@@ -64,6 +64,7 @@
 #include "lcd.h"
 #include "apcount.h"
 #include "sdrun.h"
+#include "rtc_pcf.h"
 #if SOC_MODEM_CLOCK_SUPPORTED
 #include "esp_private/esp_modem_clock.h"
 #include "hal/modem_syscon_ll.h"
@@ -2968,9 +2969,9 @@ static void battery_read(void) {}
 #define AXP2101_REG_VBAT_L   0x35
 #define AXP2101_REG_BAT_PCT  0xA4   // state of charge, percent
 static const uint8_t WATCH_PARTS[] = { 0x18, 0x40, 0x51, 0x6B };
-// Pins the watch's own hardware holds: AMOLED QSPI data 4-7, reset 8, clock 11, select 12; touch reset 9 and
-// interrupt 38; the board bus 14/15.
-static const int8_t WATCH_PINS[] = { 4, 5, 6, 7, 8, 9, 11, 12, 14, 15, 38 };
+// Pins the watch's own hardware holds: the BOOT button 0; AMOLED QSPI data 4-7, reset 8, clock 11, select 12; touch
+// reset 9 and interrupt 38; the board bus 14/15.
+static const int8_t WATCH_PINS[] = { 0, 4, 5, 6, 7, 8, 9, 11, 12, 14, 15, 38 };
 static i2c_master_dev_handle_t s_pmic;
 static bool s_watch;
 
@@ -3058,6 +3059,38 @@ static bool watch_touch_init(void) {
     ESP_LOGI(TAG, "touch FT3x68: %s (id %02x)", ok ? "ready" : "no answer after reset", id);
     if (!ok && s_touch) { i2c_master_bus_rm_device(s_touch); s_touch = NULL; }
     return ok;
+}
+
+// ── PCF85063 clock chip (SensorLib PCF85063Constants.h: address 0x51, time registers 0x04-0x0A) ──
+// It keeps UTC (what the app's `time` sends and the board's own clock holds). The watch face shows it in WATCH_TZ.
+#define PCF85063_ADDR 0x51
+#ifndef WATCH_TZ
+#define WATCH_TZ "CST6CDT,M3.2.0,M11.1.0"   // America/Chicago (POSIX rule, from the tz database); -DWATCH_TZ=... to change
+#endif
+static i2c_master_dev_handle_t s_rtc;
+
+/// The board's clock from the clock chip, when the chip holds a time (its oscillator ran since it was last set).
+static void watch_clock_init(void) {
+    setenv("TZ", WATCH_TZ, 1);
+    tzset();
+    i2c_device_config_t dc = { .dev_addr_length = I2C_ADDR_BIT_LEN_7, .device_address = PCF85063_ADDR,
+                               .scl_speed_hz = WATCH_I2C_HZ };
+    if (i2c_master_bus_add_device(s_i2c_bus, &dc, &s_rtc) != ESP_OK) { s_rtc = NULL; ESP_LOGW(TAG, "watch: clock chip not added"); return; }
+    uint8_t reg = RTC_PCF_REG_SEC, r[RTC_PCF_REGS];
+    time_t t;
+    if (i2c_master_transmit_receive(s_rtc, &reg, 1, r, sizeof(r), 50) != ESP_OK) { ESP_LOGW(TAG, "watch: clock chip unreadable"); return; }
+    if (!rtc_pcf_decode(r, &t) || t < 1700000000) { ESP_LOGI(TAG, "watch: clock chip holds no time yet (reads %02x %02x %02x %02x %02x %02x %02x)", r[0], r[1], r[2], r[3], r[4], r[5], r[6]); return; }
+    struct timeval tv = { .tv_sec = t, .tv_usec = 0 };
+    settimeofday(&tv, NULL);
+    s_clock_set = true;
+    ESP_LOGI(TAG, "clock set from rtc: %lld", (long long)t);
+}
+
+/// The clock chip follows the board's clock whenever the app (or anything else) sets it.
+static void watch_clock_store(time_t t) {
+    uint8_t w[1 + RTC_PCF_REGS] = { RTC_PCF_REG_SEC };
+    if (!s_rtc || !rtc_pcf_encode(w + 1, t)) return;
+    if (i2c_master_transmit(s_rtc, w, sizeof(w), 50) != ESP_OK) ESP_LOGW(TAG, "watch: clock chip not written");
 }
 
 /// One finger's position while the screen is touched (lcd_touch_fn, polled by the screen task).
@@ -3343,6 +3376,14 @@ static void lcd_fill(lcd_status_t *st) {
     nets = bt ? s_btlog : s_netlog;
     taskEXIT_CRITICAL(&s_netlog_lock);
     st->nets_n = (uint8_t)netlog_recent(&nets, st->nets, NETLOG_N);
+    st->wall_ok = s_clock_set;
+    if (s_clock_set) {
+        time_t now = time(NULL);
+        struct tm tm;
+        localtime_r(&now, &tm);
+        st->wall_hour = (uint8_t)tm.tm_hour; st->wall_min = (uint8_t)tm.tm_min; st->wall_wday = (uint8_t)tm.tm_wday;
+        st->wall_mday = (uint8_t)tm.tm_mday; st->wall_mon = (uint8_t)(tm.tm_mon + 1); st->wall_year = (uint16_t)(tm.tm_year + 1900);
+    }
 #endif
 }
 #endif
@@ -3414,6 +3455,7 @@ static void board_init(void) {
 #endif
 #if CONFIG_IDF_TARGET_ESP32S3
     if (s_board == BOARD_WAVESHARE_AMOLED_206) {
+        watch_clock_init();
         watch_battery_init();
         if (watch_touch_init()) lcd_set_touch(watch_touch_read);
         lcd_set_scan(watch_scan);
@@ -3928,6 +3970,9 @@ static void clock_set(time_t t, const char *from) {
     settimeofday(&tv, NULL);
     if (!s_clock_set) ESP_LOGI(TAG, "clock set from %s: %lld", from, (long long)t);
     s_clock_set = true;
+#if CONFIG_IDF_TARGET_ESP32S3
+    if (s_watch) watch_clock_store(t);   // the watch's clock chip keeps it across a reset or power loss
+#endif
 }
 
 static void sd_note_ap(const wifi_ap_record_t *ap, size_t ssid_len) {

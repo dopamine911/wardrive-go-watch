@@ -12,8 +12,9 @@
 #define LCD_SH 16                       // rows per strip
 #define LCD_STRIPS ((LCD_H + LCD_SH - 1) / LCD_SH)   // the last strip of a panel may be partial (502 = 31 x 16 + 6)
 
-// The watch: three pages, swiped left and right. Buttons on the controls page act on a hold (gesture.h).
-enum { LCD_PAGE_DASH = 0, LCD_PAGE_NETS, LCD_PAGE_CTRL, LCD_PAGES };
+// The watch: four pages, swiped left and right (the first is a plain clock). Buttons on the controls page act on a hold
+// (gesture.h).
+enum { LCD_PAGE_CLOCK = 0, LCD_PAGE_DASH, LCD_PAGE_NETS, LCD_PAGE_CTRL, LCD_PAGES };
 enum { LCD_BTN_NONE = -1, LCD_BTN_SCAN = 0, LCD_BTN_MODE, LCD_BTN_BRIGHT, LCD_BTN_SLEEP, LCD_BTNS };
 #define LCD_NETS_ROWS 5                 // networks page: rows on screen; swipe up and down for more
 #define LCD_ACT_N 42                    // 14 × 2.4 GHz, then 28 × 5 GHz

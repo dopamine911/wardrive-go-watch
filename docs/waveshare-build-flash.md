@@ -21,7 +21,7 @@ idf.py -B build-esp32s3 -D SDKCONFIG=build-esp32s3/sdkconfig build
 ```
 
 Expected:
-- `wardrive_bridge.bin binary size 0x149f90 bytes … (31%) free`.
+- `wardrive_bridge.bin binary size 0x14d9a0 bytes … (30%) free`.
 - The same three `-Wunused-function` warnings the untouched upstream source has: `display.c text_c`,
   `wardrive_bridge.c led_apply`, `board_is_awok`.
 
@@ -113,3 +113,20 @@ shift the other boards' screens.
 Wardrive Go and the rocketgod.dev flasher install the **published** ESP32-S3 image, which doesn't yet carry the
 watch support. An update from either removes the screen until this firmware is flashed again
 (`waveshare-port-analysis.md` R4).
+
+## Set the clock
+
+The watch face needs the time once. Wardrive Go doesn't send it (`waveshare-verification.md` O13), and the watch's clock
+chip starts blank. With the watch on USB and the phone app closed, send a short USB session (this puts the board's
+clock, and the chip, on UTC from this computer):
+
+```
+wdusb hello
+time <unix seconds now>      # e.g. $(date +%s)
+time                         # reads it back: WD:TIME now=… set=1
+wdusb bye
+```
+
+The chip then keeps the time across resets (`clock set from rtc` in the boot log). The face shows it in `WATCH_TZ`
+(default America/Chicago): for another zone edit that `#define` next to `watch_clock_init()` in
+`main/wardrive_bridge.c` to a POSIX TZ rule and rebuild (verification O14).

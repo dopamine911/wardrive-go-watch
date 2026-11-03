@@ -1060,7 +1060,7 @@ static void w_header(const lcd_frame_t *f) {
 
 static void w_dots(const lcd_frame_t *f) {
     for (int p = 0; p < LCD_PAGES; p++) {
-        int cx = W / 2 + (p - 1) * 24;
+        int cx = W / 2 + (2 * p - (LCD_PAGES - 1)) * 12;   // centered whatever the page count
         if (p == f->page) circle(cx, W_DOTS_Y, 6, 0, C_CYAN, 16);
         else circle(cx, W_DOTS_Y, 5, 2, C_EDGE, 16);
     }
@@ -1122,6 +1122,60 @@ static void w_spectrum(const lcd_frame_t *f, int base, int top) {
             for (int y = 0; y < h; y++) fill(x, base - 1 - y, bw, 1, mix(C_TEAL, C_MAG, y, top));
         }
     }
+}
+
+static const char *const W_DAYS[] = { "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT" };
+static const char *const W_MONTHS[] = { "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC" };
+
+// The first page: a plain watch face. The time, the date, the battery, and one small counter for the scan mode.
+static void w_watchface(const lcd_frame_t *f) {
+    const lcd_status_t *st = &f->st;
+    fill(0, s_y0, W, SH, C_BLACK);
+    char b[24];
+    if (st->batt_pct >= 0) {   // the battery: percent and a small cell, centered at the top (inside the corner curve)
+        int pct = st->batt_pct > 100 ? 100 : st->batt_pct;
+        uint16_t c = pct > 40 ? C_DIM : pct > 15 ? C_AMBER : C_RED;
+        snprintf(b, sizeof(b), "%d%%", pct);
+        int tw = text_w(&wfont_label, b, 0), x0 = (W - (tw + 10 + 30)) / 2;
+        text(&wfont_label, x0, 62, b, c);
+        rrect_line(x0 + tw + 10, 46, 26, 16, 4, 2, c, 16);
+        rrect(x0 + tw + 36, 50, 3, 8, 1, c, 16);
+        int lw = 18 * pct / 100;
+        if (lw > 0) rrect(x0 + tw + 14, 50, lw, 8, 2, c, 16);
+    }
+    // The time: 12-hour, no leading zero. The big fonts have digits and no colon or dash, so the colon is two dots, and
+    // a clock that isn't set yet shows a short bar where each pair of digits goes.
+    char hh[4], mm[4];
+    unsigned h12 = st->wall_hour % 12 ? st->wall_hour % 12 : 12;
+    if (st->wall_ok) { snprintf(hh, sizeof(hh), "%u", h12); snprintf(mm, sizeof(mm), "%02u", st->wall_min); }
+    else { strcpy(hh, "00"); strcpy(mm, "00"); }
+    const int sp = 3, colon = 30, base = 262;
+    int hw = text_w(&wfont_huge, hh, sp), mw = text_w(&wfont_huge, mm, sp);
+    int x0 = (W - (hw + colon + mw)) / 2;
+    uint16_t dot = st->wall_ok ? C_WHITE : C_FAINT;
+    if (st->wall_ok) {
+        text_ex(&wfont_huge, x0, base, hh, sp, C_WHITE, C_WHITE, SOLID, 16);
+        text_ex(&wfont_huge, x0 + hw + colon, base, mm, sp, C_WHITE, C_WHITE, SOLID, 16);
+    } else {
+        rrect(x0 + 8, base - 40, hw - 16, 8, 4, C_FAINT, 16);
+        rrect(x0 + hw + colon + 8, base - 40, mw - 16, 8, 4, C_FAINT, 16);
+    }
+    circle(x0 + hw + colon / 2, base - 52, 5, 0, dot, 16);
+    circle(x0 + hw + colon / 2, base - 22, 5, 0, dot, 16);
+    if (st->wall_ok) {
+        snprintf(b, sizeof(b), "%s %s %u", W_DAYS[st->wall_wday % 7], W_MONTHS[(st->wall_mon + 11) % 12], st->wall_mday);
+        text_ex(&wfont_body, (W - text_w(&wfont_body, b, 2)) / 2, 322, b, 2, C_DIM, C_DIM, SOLID, 16);
+        const char *ap = st->wall_hour >= 12 ? "PM" : "AM";
+        text(&wfont_label, (W - text_w(&wfont_label, ap, 0)) / 2, 358, ap, C_FAINT);
+    } else {
+        const char *a = "NO TIME YET";
+        text_ex(&wfont_body, (W - text_w(&wfont_body, a, 2)) / 2, 322, a, 2, C_FAINT, C_FAINT, SOLID, 16);
+    }
+    // One small counter for the scan mode: the number the dashboard shows large (APs in range, or BLE devices).
+    const char *mode = !strcmp(st->mode, "BT") ? "BT" : !strcmp(st->mode, "CAP") ? "CAP" : "WI-FI";
+    if (st->scanning) snprintf(b, sizeof(b), "%s  %lu", mode, (unsigned long)(!strcmp(st->mode, "BT") ? st->bt_devices : f->live));
+    else snprintf(b, sizeof(b), "%s  --", mode);
+    text(&wfont_label, (W - text_w(&wfont_label, b, 0)) / 2, 440, b, st->scanning ? C_DIM : C_FAINT);
 }
 
 static void w_dashboard(const lcd_frame_t *f) {
@@ -1380,6 +1434,7 @@ static void watch_scene(const lcd_frame_t *f) {
     else if (f->alerting && is_toy(f->alert)) toy_alert(f);
     else if (f->alerting) w_alert(f);
     else if (f->now - f->t0 < 2200) w_splash(f);
+    else if (f->page == LCD_PAGE_CLOCK) w_watchface(f);
     else if (f->page == LCD_PAGE_NETS) w_networks(f);
     else if (f->page == LCD_PAGE_CTRL) w_controls(f);
     else w_dashboard(f);

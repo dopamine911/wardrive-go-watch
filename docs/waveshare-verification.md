@@ -65,6 +65,8 @@ Nothing here comes from a simulator. Host tests cover only the hardware-independ
 | O10 | Long serial captures lose stretches of log | bench tooling | Captures of a minute or more sometimes stop receiving and deliver part of the backlog on the next open; the lost stretch is gone. Upstream logs through the ESP-IDF console when no USB session is open. Boot captures and short captures were reliable. Product behaviour is unaffected (the app path showed no gaps) |
 | O11 | A phone linked but not subscribed (Wardrive Go in the background) never starts the scan | upstream behaviour, now visible | HW-LOG: `phone connected` with no `notifications on` until the app was opened. The watch shows SCAN `WAITING` / `OPEN THE APP` for that state (#28) |
 | O12 | Screen task stack headroom | watch, unmeasured baseline | HW-LOG: `stack left 1024` of 4096 bytes after Bluetooth and capture runs (#36–37); no earlier figure to compare. INFER (0.6): the deepest call is the formatted diagnostic `ESP_LOGI` itself, unchanged by the per-mode pages. Watch it in the soak; raise the task stack if it drops |
+| O13 | Wardrive Go doesn't send the time | upstream/app behaviour | HW-LOG: 40 s after the app linked, its commands were `wdstream`, `iam` and nothing else (no `time`). The chip starts blank, so the clock face reads NO TIME YET until the clock is set once over USB (docs/waveshare-build-flash.md "Set the clock"). After that the chip keeps it across resets. Not tested, and unknown: whether it keeps time when the battery runs flat and USB is out (which rail powers it wasn't read from the schematic) |
+| O14 | Timezone is compiled in | design limit | The chip and the board's clock hold UTC; the face shows it in `WATCH_TZ` (default America/Chicago, `CST6CDT,M3.2.0,M11.1.0`, from the host's tz database). Another zone, or travelling, needs the `#define` edited and a rebuild. DST switching is newlib's, not exercised yet (next change: 2027-03-14) |
 
 ## Phase 2–3: battery, phone alerts, touch, screen sleep (2026-11-03)
 
@@ -122,3 +124,20 @@ clients weren't shown. Now the dashboard and page 2 show what the current mode m
 | 36 | Bluetooth mode | pass | HW-EYE: page 1 shows BLE DEVICES LAST 10 S, THIS WINDOW, WINDOWS, STRONGEST, no channel bars; page 2 is a DEVICES list (name or `<no name>`, address, RSSI, public/random). HW-LOG: `bt on` → `bluetooth scan started`, pages 0–2 visited, no fault |
 | 37 | Capture mode | pass | HW-EYE: page 1 shows HANDSHAKES, PMKIDS, CLIENTS and the channel bars; page 2 NETWORKS fills from capture's AP sightings. HW-LOG: `cap on` → `capture started`; `lcd: 84 frames in 60 s, avg 164 ms` while capturing |
 | 38 | Builds and previews | pass | BUILD: esp32s3 0x149f90; esp32c3/c6/c5 unchanged in size and warnings. AUTO: `tools/netlog_test.c` passes; `docs/previews/w11-dashboard-bt.png`, `w12-devices-bt.png`, `w13-dashboard-cap.png` |
+
+## Watch face, BOOT button (2026-11-03)
+
+Page numbers from here: 0 clock, 1 dashboard, 2 networks, 3 controls. Rows #24 and #36–37 describe the earlier
+three-page layout (dashboard 0, networks 1, controls 2). Asked for: a plain watch screen (time, date, one small counter
+for the mode) and the BOOT button to step the mode.
+
+| # | Check | Result | Evidence |
+|---|---|---|---|
+| 39 | Clock-chip register conversion | pass | AUTO: `tools/rtc_pcf_test.c` (a known epoch ↔ registers, leap day, 2000, year end, a round trip every 7 h 13 min 11 s for 25 years, years outside 2000–2099 refused, oscillator-stopped flag, blank and garbage registers). Not mutation-tested |
+| 40 | The clock chip starts blank | pass (expected) | HW-LOG: `clock chip holds no time yet (reads b4 20 19 01 06 01 00)`: oscillator-stopped flag set, year 2000 |
+| 41 | Seeded over USB, kept across a reset and a reflash | pass | HW-LOG: `wdusb hello`, `time <epoch>` → `WD:TIME now=1793736556 set=1` (host 1793736557); after a reset `clock set from rtc: 1793736565` at uptime 0.57 s (host 1793736575 ten seconds later); after two later reflashes `clock set from rtc: 1793737012` |
+| 42 | Clock face | pass | HW-EYE: the first page shows the right local time and date and a small WI-FI counter, no WARDRIVE header. AUTO/visual: `docs/previews/w14-clock.png`, `w15-clock-bt-midnight.png` (12:05 AM, BT counter, red battery), `w16-clock-no-time.png`; inside the 110 px corner curve |
+| 43 | BOOT steps the mode | pass | HW-LOG: `watch: BOOT, mode after WIFI` → `cmd: 'bt on'` → `bluetooth scan started`; `after BT` → `cap on` → `capture started`; `after CAP` → `cap off` → `stream started`. HW-EYE: a press with the screen dark woke it and moved the mode; the counter followed the mode. A first run logged six events in 50 s (two pairs 0.2–0.5 s apart) for what was meant to be two presses; the user had misread the instruction and pressed more often, so that count means nothing |
+| 43a | One press = one step | pass | HW-LOG, throwaway build logging every level change of GPIO 0 (then removed): two single presses, each exactly one low edge (13130→13280 ms and 33020→33190 ms, 150–170 ms) and one `watch: BOOT` ~30–50 ms in. No chatter seen on the pin. Two presses, so a bounce that shows once in 100 would be missed |
+| 44 | Four pages | pass | HW-EYE: swipes go clock → dashboard → networks → controls, dots centered |
+| 45 | Builds | pass | BUILD: esp32s3 0x14d9a0 (30 % free); esp32c3 and esp32c6 unchanged; esp32c5 (CSI line removed) +0x10; warnings identical to untouched upstream |

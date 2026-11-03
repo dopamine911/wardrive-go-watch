@@ -45,6 +45,9 @@ typedef struct {
     uint32_t bt_now;         // Bluetooth mode: devices so far in the current 10 s window (bt_devices: the last whole one)
     uint32_t bt_windows;     // Bluetooth mode: windows since the mode started
     uint32_t cap_hs, cap_pmkid, cap_clients;   // capture mode: handshakes, PMKIDs, stations, this capture session
+    bool     wall_ok;        // the clock holds real time (the clock chip, or the app's `time`); the fields below are local
+    uint8_t  wall_hour, wall_min, wall_wday, wall_mday, wall_mon;   // wday 0 = Sunday, mon 1-12
+    uint16_t wall_year;
     uint8_t  nets_n;         // entries in nets, most recently heard first
     netlog_rec_t nets[NETLOG_N];   // Wi-Fi and capture: APs; Bluetooth: devices (ch 0, auth = address type)
 } lcd_status_t;
