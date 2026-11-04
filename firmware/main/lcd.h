@@ -76,6 +76,12 @@ bool lcd_open_amoled(void);
 /// Splash, then the live dashboard on a low-priority task.
 void lcd_start(const char *board, const char *version, lcd_fill_fn fill);
 bool lcd_running(void);
+/// For the bench diagnostics: the screen task's stack never used (bytes, -1 = no task), whether the panel is dark, the
+/// drawing cost of its last one-minute window (touch screens only), and the "lcd:" log line on or off.
+long lcd_stack_free(void);
+bool lcd_dark(void);
+void lcd_diag_last(uint16_t *frames, uint16_t *avg_ms, uint16_t *worst_ms);
+void lcd_diag_log(bool on);
 /// "240x320" / "128x128" / "410x502" while a screen runs, else "".
 const char *lcd_size(void);
 /// A Wi-Fi AP sighting (Wi-Fi scan or capture): unique count, "+new" ticker, channel activity.

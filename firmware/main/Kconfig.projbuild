@@ -72,4 +72,20 @@ config WARDRIVEESP_BENCH_NO_ADV_SETTLE
         Brings back the 1.6.3 timing, when a waiting phone links within about 0.15 s of boot, to reproduce the
         early-link heap corruption. Never enable this in a published build.
 
+config WARDRIVEESP_MEMDIAG
+    bool "Bench only: memory and runtime diagnostics (MD lines, diag/bench commands)"
+    default n
+    help
+        Samples heap, the largest free block, task stacks, BLE output buffers, queue depths, allocation failures and
+        task watchdog events each second, and keeps one snapshot per interval in a ring in RTC memory that survives a
+        software reset. Each snapshot is printed as an "MD ..." line on the USB port. Adds `diag`, `diag dump`,
+        `diag clear` and the stress commands `bench mode|alert|drop|lcdlog`, accepted on the USB port without opening
+        a session (a session turns Bluetooth off). No WD: protocol change. Leave off in published builds.
+
+config WARDRIVEESP_MEMDIAG_INTERVAL_S
+    int "Seconds between diagnostic snapshots"
+    default 60
+    range 5 3600
+    depends on WARDRIVEESP_MEMDIAG
+
 endmenu

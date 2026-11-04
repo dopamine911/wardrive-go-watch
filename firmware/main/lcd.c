@@ -198,6 +198,9 @@ static lcd_touch_fn s_touch;        // touch screens (the watch): finger down an
 static lcd_frame_t s_frame;         // the frame being drawn (static: the watch's carries its recent networks, ~1.6 KB)
 static bool s_down, s_dark;                 // the finger now, the panel dark
 static volatile bool s_redraw;              // a touch or a new alert changed what the frame shows: draw it now
+// The watch's drawing cost over its last DIAG_MS window, for the bench diagnostics (lcd_diag_last).
+static volatile uint16_t s_diag_frames, s_diag_avg_ms, s_diag_worst_ms;
+static volatile bool s_diag_log = true;     // the "lcd:" log line (off: a stack mark without that call in it)
 static int s_tx, s_ty;
 static uint32_t s_poll_at, s_touch_at;      // last touch poll, last time a finger was down
 static void touch_tick(uint32_t now);
@@ -701,12 +704,16 @@ static void lcd_task(void *arg) {
             if (want != bl) { backlight(want); bl = want; }
         }
         if (s_touch && now - diag_at >= DIAG_MS && frames) {   // the watch: what drawing costs, for the bench log
-            ESP_LOGI(TAG, "lcd: %lu frames in %lu s, avg %lu ms (paint %lu, panel %lu, touch %lu, state %lu), worst %lu ms, "
-                     "%lu strips sent, stack left %lu",
-                     (unsigned long)frames, (unsigned long)((now - diag_at) / 1000), (unsigned long)(draw_us / frames / 1000),
-                     (unsigned long)(s_paint_us / frames / 1000), (unsigned long)(s_io_us / frames / 1000),
-                     (unsigned long)(s_touch_us / frames / 1000), (unsigned long)(gather_us / frames / 1000),
-                     (unsigned long)(worst_us / 1000), (unsigned long)strips, (unsigned long)uxTaskGetStackHighWaterMark(NULL));
+            s_diag_frames = (uint16_t)frames;
+            s_diag_avg_ms = (uint16_t)(draw_us / frames / 1000);
+            s_diag_worst_ms = (uint16_t)(worst_us / 1000);
+            if (s_diag_log)
+                ESP_LOGI(TAG, "lcd: %lu frames in %lu s, avg %lu ms (paint %lu, panel %lu, touch %lu, state %lu), worst %lu ms, "
+                         "%lu strips sent, stack left %lu",
+                         (unsigned long)frames, (unsigned long)((now - diag_at) / 1000), (unsigned long)(draw_us / frames / 1000),
+                         (unsigned long)(s_paint_us / frames / 1000), (unsigned long)(s_io_us / frames / 1000),
+                         (unsigned long)(s_touch_us / frames / 1000), (unsigned long)(gather_us / frames / 1000),
+                         (unsigned long)(worst_us / 1000), (unsigned long)strips, (unsigned long)uxTaskGetStackHighWaterMark(NULL));
             diag_at = now; frames = strips = 0; draw_us = worst_us = gather_us = s_paint_us = s_io_us = s_touch_us = 0;
         }
         vTaskDelay(pdMS_TO_TICKS(s_touch ? TOUCH_POLL_MS : period));
@@ -751,6 +758,12 @@ void lcd_start(const char *board, const char *version, lcd_fill_fn fill_fn) {
 }
 
 bool lcd_running(void) { return s_task != NULL; }
+long lcd_stack_free(void) { return s_task ? (long)uxTaskGetStackHighWaterMark(s_task) : -1; }
+bool lcd_dark(void) { return s_dark; }
+void lcd_diag_last(uint16_t *frames, uint16_t *avg_ms, uint16_t *worst_ms) {
+    *frames = s_diag_frames; *avg_ms = s_diag_avg_ms; *worst_ms = s_diag_worst_ms;
+}
+void lcd_diag_log(bool on) { s_diag_log = on; }
 
 // ── microSD slot (the Koko V8 / AWOK Dual C5 layout: card on CS 10 of the panel's bus) ──
 bool lcd_sd_slot(int *host, int *cs) {

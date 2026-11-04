@@ -1,0 +1,6 @@
+# Bench image with the memory and runtime diagnostics (docs/memory-audit.md section 9). Build next to the normal one:
+#   idf.py -B build-esp32s3-diag -D SDKCONFIG=build-esp32s3-diag/sdkconfig \
+#          -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.memdiag" set-target esp32s3 build
+# Never publish this image.
+CONFIG_WARDRIVEESP_MEMDIAG=y
+CONFIG_WARDRIVEESP_MEMDIAG_INTERVAL_S=60

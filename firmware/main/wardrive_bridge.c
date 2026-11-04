@@ -65,6 +65,10 @@
 #include "apcount.h"
 #include "sdrun.h"
 #include "rtc_pcf.h"
+#if CONFIG_WARDRIVEESP_MEMDIAG
+#include "memdiag.h"
+#include "esp_task_wdt.h"
+#endif
 #if SOC_MODEM_CLOCK_SUPPORTED
 #include "esp_private/esp_modem_clock.h"
 #include "hal/modem_syscon_ll.h"
@@ -311,6 +315,10 @@ static volatile uint32_t s_bt_count     = 0;
 static volatile uint32_t s_bt_windows   = 0;
 static volatile uint32_t s_bt_last      = 0;
 static volatile uint32_t s_bt_dropped   = 0;
+#if CONFIG_WARDRIVEESP_MEMDIAG
+static volatile uint32_t s_md_qdrop = 0;   // bench diagnostics: Bluetooth records dropped, summed over every window
+static void md_command(const char *s);     // `diag ...` / `bench ...` on a USB port without a session
+#endif
 
 // GPS role (PROTOCOL.md "GPS", firmware 1.4+): an optional UART NMEA receiver. The task runs continuously and
 // emits WD:GPS whenever it parses a valid fix; the phone uses it as a location source when its own fix is stale
@@ -736,6 +744,9 @@ static void bt_task(void *arg) {
             send_line("WD:STATUS bt=%lu scans=%lu dropped=%lu", (unsigned long)s_bt_count,
                       (unsigned long)s_bt_windows, (unsigned long)s_bt_dropped);
             s_bt_count = 0;
+#if CONFIG_WARDRIVEESP_MEMDIAG
+            s_md_qdrop += s_bt_dropped;
+#endif
             s_bt_dropped = 0;
         }
         rc = bt_disc_start();
@@ -4625,6 +4636,9 @@ static void usb_line(usb_port_t *p) {
         cmd_sd(s + 2, p->sink, false);
         xSemaphoreGive(s_cmd_lock);
     }
+#if CONFIG_WARDRIVEESP_MEMDIAG
+    else if (!strncmp(s, "diag", 4) || !strncmp(s, "bench", 5)) md_command(s);   // no session: Bluetooth stays up
+#endif
 }
 
 static void usb_rx(usb_port_t *p, const uint8_t *buf, size_t n) {
@@ -5231,6 +5245,190 @@ static void modem_reset_stale(void) {
 #endif
 }
 
+#if CONFIG_WARDRIVEESP_MEMDIAG
+// ─── Bench diagnostics (CONFIG_WARDRIVEESP_MEMDIAG; docs/memory-audit.md section 9) ────────────────────────────
+// wd_health samples once a second; every MEMDIAG_INTERVAL_S one snapshot goes into a ring in RTC memory (kept across a
+// software reset or panic) and out as an "MD ..." line on the USB port while no session holds it. Nothing here runs on
+// the scan or Bluetooth paths. Internal heap only: this image has no PSRAM.
+static RTC_NOINIT_ATTR memdiag_ring_t s_md_ring;
+static portMUX_TYPE s_md_lock = portMUX_INITIALIZER_UNLOCKED;   // the ring: wd_health writes, wd_usb dumps
+static memdiag_acc_t s_md_acc;
+static volatile uint32_t s_md_allocfail, s_md_allocfail_size, s_md_allocfail_caps;
+static volatile uint32_t s_md_twdt;
+static uint32_t s_md_txdrop_seen, s_md_qdrop_seen, s_md_capdrop_seen;
+static bool s_md_kept;
+
+static void md_alloc_failed(size_t size, uint32_t caps, const char *fn) {
+    (void)fn;
+    s_md_allocfail++;
+    s_md_allocfail_size = (uint32_t)size;
+    s_md_allocfail_caps = caps;
+}
+
+/// The task watchdog fired. It doesn't reset this image (ESP_TASK_WDT_PANIC is off), so this count is the only trace.
+void IRAM_ATTR esp_task_wdt_isr_user_handler(void) { s_md_twdt++; }
+
+static void md_boot(void) {
+    esp_reset_reason_t why = esp_reset_reason();
+    s_md_kept = why != ESP_RST_POWERON && memdiag_ring_valid(&s_md_ring);   // the minutes before an unexpected reset
+    if (!s_md_kept) memdiag_ring_init(&s_md_ring);
+    heap_caps_register_failed_alloc_callback(md_alloc_failed);
+    ESP_LOGI(TAG, "MD boot reset=%d ring=%s next_seq=%lu interval=%d s", (int)why, s_md_kept ? "kept" : "new",
+             (unsigned long)s_md_ring.next_seq, CONFIG_WARDRIVEESP_MEMDIAG_INTERVAL_S);
+}
+
+/// One line plus newline, straight to the USB port (the driver path, not the console's) when no session holds it.
+static void md_out(char *buf, size_t n, size_t cap, TickType_t wait) {
+    if (n + 1 >= cap) n = cap - 2;
+    buf[n++] = '\n';
+#if USB_JTAG_LINK
+    if (s_usj.up && !(s_usb_sessions & SINK_USB)) { usb_serial_jtag_write_bytes(buf, n, wait); return; }
+#endif
+    (void)wait;
+    ESP_LOGI(TAG, "%.*s", (int)(n - 1), buf);
+}
+
+static uint16_t md_stack(TaskHandle_t t) {
+    if (!t) return MEMDIAG_NO_TASK;
+    UBaseType_t v = uxTaskGetStackHighWaterMark(t);
+    return v >= MEMDIAG_NO_TASK ? MEMDIAG_NO_TASK - 1 : (uint16_t)v;
+}
+
+static uint8_t md_q_depth(void) {
+    QueueHandle_t q = s_role == ROLE_CAP ? s_cap_queue : s_role == ROLE_BT ? s_bt_queue : NULL;
+    UBaseType_t d = q ? uxQueueMessagesWaiting(q) : 0;
+    return d > 255 ? 255 : (uint8_t)d;
+}
+
+static uint16_t md_u16(uint32_t v) { return v > 0xFFFF ? 0xFFFF : (uint16_t)v; }
+
+/// Everything now. `commit`: this is the interval's snapshot, so the per-interval counters start over after it.
+static void md_snapshot(memdiag_snap_t *s, bool commit) {
+    memset(s, 0, sizeof(*s));
+    s->up_s = (uint32_t)(esp_timer_get_time() / 1000000);
+    s->heap_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    s->heap_min_life = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+    uint32_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    s->heap_min_iv = s_md_acc.any ? s_md_acc.heap_min : s->heap_free;
+    s->largest_min_iv = s_md_acc.any ? s_md_acc.largest_min : largest;
+    long lcd = lcd_stack_free();
+    s->stack[MD_ST_LCD] = lcd < 0 ? MEMDIAG_NO_TASK : md_u16((uint32_t)lcd);
+    TaskHandle_t role = s_scan_task ? s_scan_task : s_bt_task ? s_bt_task : s_cap_task ? s_cap_task : s_csi_task;
+    s->stack[MD_ST_ROLE] = md_stack(role);
+    s->stack[MD_ST_USB] = md_stack(s_usb_task);
+    s->stack[MD_ST_HEALTH] = md_stack(s_health_task);
+    s->stack[MD_ST_BTPWR] = md_stack(s_btpwr_task);
+    s->stack[MD_ST_HOST] = md_stack(xTaskGetHandle("nimble_host"));
+    s->stack[MD_ST_WIFI] = md_stack(xTaskGetHandle("wifi"));
+    s->stack[MD_ST_TIMER] = md_stack(xTaskGetHandle("esp_timer"));
+    s->allocfail = md_u16(s_md_allocfail);
+    s->twdt = md_u16(s_md_twdt);
+    lcd_diag_last(&s->lcd_frames, &s->lcd_avg_ms, &s->lcd_worst_ms);
+    uint32_t tx = s_tx_dropped, qd = s_md_qdrop, cd = s_cap_dropped;
+    uint32_t cap_new = cd >= s_md_capdrop_seen ? cd - s_md_capdrop_seen : cd;   // a capture start zeroes its counter
+    s->txdrop_iv = md_u16(tx - s_md_txdrop_seen);
+    s->qdrop_iv = md_u16((qd - s_md_qdrop_seen) + cap_new);
+    if (s_bt_up) {
+        int total = os_msys_count(), free_now = os_msys_num_free();
+        s->msys_total = (uint8_t)(total > 255 ? 255 : total);
+        s->msys_min_iv = s_md_acc.any ? s_md_acc.msys_min : (uint8_t)(free_now > 255 ? 255 : free_now);
+    }
+    s->q_max_iv = s_md_acc.q_max;
+    s->role = (uint8_t)s_role;
+    s->flags = (s_conn_handle != BLE_HS_CONN_HANDLE_NONE ? MD_F_BLE : 0) | (s_notify_enabled ? MD_F_NOTIFY : 0) |
+               (s_usb_sessions ? MD_F_USB : 0) | (lcd_dark() ? MD_F_DARK : 0) |
+               ((s_streaming || s_bt_running || s_cap_running || s_csi_running) ? MD_F_SCANNING : 0);
+    s->aps = apc_session();
+    s->sweeps = s_sweeps;
+    if (commit) { s_md_txdrop_seen = tx; s_md_qdrop_seen = qd; s_md_capdrop_seen = cd; }
+}
+
+/// Once a second from wd_health.
+static void md_tick(uint32_t now) {
+    static uint32_t last_push;
+    static char line[512];
+    int msys = s_bt_up ? os_msys_num_free() : 0;
+    memdiag_acc_fold(&s_md_acc, heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                     heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL), (uint8_t)(msys > 255 ? 255 : msys),
+                     md_q_depth());
+    if (now - last_push < CONFIG_WARDRIVEESP_MEMDIAG_INTERVAL_S * 1000u) return;
+    last_push = now;
+    memdiag_snap_t s;
+    md_snapshot(&s, true);
+    taskENTER_CRITICAL(&s_md_lock);
+    s.seq = memdiag_push(&s_md_ring, &s);
+    taskEXIT_CRITICAL(&s_md_lock);
+    memdiag_acc_reset(&s_md_acc);
+    size_t n = memdiag_format(&s, line, sizeof(line));
+    if (n) md_out(line, n, sizeof(line), pdMS_TO_TICKS(20));
+}
+
+/// `diag` (a snapshot now, not stored), `diag dump` (the ring, oldest first), `diag clear`; `bench mode` (the MODE
+/// button's path), `bench alert` (the app's alert path), `bench drop` (end the phone's link), `bench lcdlog 0|1`.
+/// Runs on wd_usb.
+static void md_command(const char *s) {
+    static char line[512];
+    memdiag_snap_t snap;
+    size_t n;
+    if (!strcmp(s, "diag")) {
+        md_snapshot(&snap, false);
+        if ((n = memdiag_format(&snap, line, sizeof(line)))) md_out(line, n, sizeof(line), pdMS_TO_TICKS(100));
+        n = (size_t)snprintf(line, sizeof(line), "MD now allocfail_last=%lu caps=0x%lx reset=%d ring=%s next_seq=%lu "
+                             "internal_total=%u largest_now=%u",
+                             (unsigned long)s_md_allocfail_size, (unsigned long)s_md_allocfail_caps,
+                             (int)esp_reset_reason(), s_md_kept ? "kept" : "new", (unsigned long)s_md_ring.next_seq,
+                             (unsigned)heap_caps_get_total_size(MALLOC_CAP_INTERNAL),
+                             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+        md_out(line, n, sizeof(line), pdMS_TO_TICKS(100));
+        return;
+    }
+    if (!strcmp(s, "diag dump")) {
+        unsigned got = 0;
+        for (size_t i = 0; i < MEMDIAG_N; i++) {
+            taskENTER_CRITICAL(&s_md_lock);
+            bool ok = memdiag_get(&s_md_ring, i, &snap);
+            taskEXIT_CRITICAL(&s_md_lock);
+            if (!ok || !(n = memdiag_format(&snap, line, sizeof(line)))) continue;
+            md_out(line, n, sizeof(line), pdMS_TO_TICKS(200));
+            got++;
+        }
+        n = (size_t)snprintf(line, sizeof(line), "MD dump end n=%u", got);
+        md_out(line, n, sizeof(line), pdMS_TO_TICKS(200));
+        return;
+    }
+    const char *reply = NULL;
+    if (!strcmp(s, "diag clear")) {
+        taskENTER_CRITICAL(&s_md_lock);
+        memdiag_ring_init(&s_md_ring);
+        taskEXIT_CRITICAL(&s_md_lock);
+        reply = "MD cleared";
+    }
+#if CONFIG_IDF_TARGET_ESP32S3
+    else if (!strcmp(s, "bench mode")) {
+        n = (size_t)snprintf(line, sizeof(line), "MD bench mode after %s", role_name(s_role));
+        md_out(line, n, sizeof(line), pdMS_TO_TICKS(100));
+        watch_scan(LCD_SCAN_NEXT_MODE);
+        return;
+    }
+#endif
+    else if (!strcmp(s, "bench alert")) {
+        static const char ALERT[] = "led alert spin 00C8FF 2 BENCH";
+        run_command((const uint8_t *)ALERT, sizeof(ALERT) - 1, SINK_USB);
+        reply = "MD bench alert";
+    } else if (!strcmp(s, "bench drop")) {
+        run_command((const uint8_t *)"drop", 4, SINK_USB);
+        reply = "MD bench drop";
+    } else if (!strcmp(s, "bench lcdlog 0") || !strcmp(s, "bench lcdlog 1")) {
+        lcd_diag_log(s[13] == '1');
+        reply = s[13] == '1' ? "MD lcdlog on" : "MD lcdlog off";
+    } else {
+        reply = "MD usage: diag | diag dump | diag clear | bench mode | bench alert | bench drop | bench lcdlog 0|1";
+    }
+    n = (size_t)snprintf(line, sizeof(line), "%s", reply);
+    md_out(line, n, sizeof(line), pdMS_TO_TICKS(100));
+}
+#endif
+
 static long stack_free(TaskHandle_t t) { return t ? (long)uxTaskGetStackHighWaterMark(t) : -1; }
 
 /// WD:HEALTH every 15 s while a host listens: memory, the least stack each task has had left (bytes), the link.
@@ -5245,6 +5443,9 @@ static void health_task(void *arg) {
         heap_check("health 1 s");
         s_heap_min_seen = esp_get_minimum_free_heap_size();
         uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+#if CONFIG_WARDRIVEESP_MEMDIAG
+        md_tick(now);
+#endif
         if (s_has_batt && now - last_batt >= 30000) { last_batt = now; battery_read(); }   // the I2C gauge only
 #if CONFIG_IDF_TARGET_ESP32S3
         static uint32_t last_charge;
@@ -5354,6 +5555,9 @@ void app_main(void) {
     s_cmd_lock = xSemaphoreCreateMutex();
     s_sd_lock = xSemaphoreCreateMutex();
     boot_diag_begin();
+#if CONFIG_WARDRIVEESP_MEMDIAG
+    md_boot();
+#endif
     board_init();   // before GPS: a board's own bus (the gauge on 4/5) is off limits to the GPS probe
     wifi_bring_up();
     heap_check("boot: after Wi-Fi start");
