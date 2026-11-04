@@ -15,8 +15,8 @@ Ordered by impact. Confidence in brackets.
    service UUID `47686F73-…`, no `WardriveESP`/`iosESP` name, no `wdstream`, no `WD:` parsing (grep over a fresh
    clone: zero hits). WardriveESP 1.0 shipped 2026-10-05, after that push. The app that speaks the protocol is
    closed source: it ships only through Google Play (`com.rocketgod.wardrive`), the App Store (`id6783390938`) and
-   iOS TestFlight 2.23 (2) (`ref/RocketGod-git.github.io/WardriveGo/ios-version.json`). The site repo
-   `ref/RocketGod-git.github.io` (`5fd566a`) has release binaries, `version.json` and the web flasher, but no app
+   iOS TestFlight 2.23 (2) (site repo `WardriveGo/ios-version.json`). The site repo
+   `RocketGod-git/RocketGod-git.github.io` (`5fd566a`) has release binaries, `version.json` and the web flasher, but no app
    source. The WardriveESP GitHub repo named in its README (`RocketGod-git/WardriveESP`) does not resolve publicly.
    Consequences:
    - "Mobile-side changes if necessary" (Phase 3) is **blocked**: there is nothing to change.
@@ -50,7 +50,7 @@ Ordered by impact. Confidence in brackets.
    the board's own GPS position. The watch has no GPS. `sdrun.c` is also SPI-only and stubbed on S3
    (`sdrun.c:13-38`), and it hard-codes `SPI2_HOST` (`sdrun.c:129-144`), which is the display's QSPI host.
 9. **Official flashing tools pick the image by chip only, and erase the whole flash.** [0.9] The web flasher maps
-   chip to image (`ref/RocketGod-git.github.io/WardriveESP/index.html:270-275`, `:754-758`) and writes with
+   chip to image (site repo `WardriveESP/index.html:270-275`, `:754-758`) and writes with
    `eraseAll = true` (`:764`). Erasing clears NVS, including a stored `board <id>`. The Marauder Mini v3 needed a
    special case in the flasher to put its identity back (`:597-613`, `:635-641`). The download step is "sanity-checked
    like the app does" (`:449`), so the app's USB flasher is probably also per chip [INFERENCE].
@@ -63,11 +63,15 @@ Ordered by impact. Confidence in brackets.
 
 ## 1. Sources and provenance
 
+Every citation in these docs that names a Waveshare file, or a rocketgod.dev site file, is relative to the repository
+and commit in this table. The local clones under `ref/` that this analysis was read from were removed on 2026-11-03
+(nothing in them was uncommitted or unpushed).
+
 | Source | Revision | Receipt |
 |---|---|---|
-| WardriveESP | 1.7.5 (`FW_VERSION`, `wardrive_bridge.c:82`) | `ref/wardrive-bridge-package/source` is byte-identical to the current `rocketgod.dev/WardriveESP/WardriveESP.zip` (`diff -rq`, 2026-11-03). `cmp` of that zip against `ref/RocketGod-git.github.io/WardriveESP/WardriveESP.zip`: identical. `version.json` latest = 1.7.5. |
-| rocketgod.dev site | `5fd566a` (2026-11-03) | `ref/RocketGod-git.github.io`; web flasher, bins, `version.json`; no app source |
-| Waveshare repo | `30f3b23` | `ref/ESP32-S3-Touch-AMOLED-2.06` |
+| WardriveESP | 1.7.5 (`FW_VERSION`, `wardrive_bridge.c:82`) | The release package's `source/` is byte-identical to the current `rocketgod.dev/WardriveESP/WardriveESP.zip` (`diff -rq`, 2026-11-03), and to `firmware/` at the vendor commit `6b386b1`. The site repo's `WardriveESP/WardriveESP.zip` at `5fd566a`: identical (`cmp`). `version.json` latest = 1.7.5. |
+| rocketgod.dev site | `5fd566a268f3933ccca6c8894d161e05490d5d85` (2026-11-03) | [`RocketGod-git/RocketGod-git.github.io`](https://github.com/RocketGod-git/RocketGod-git.github.io/tree/5fd566a268f3933ccca6c8894d161e05490d5d85); web flasher, bins, `version.json`; no app source |
+| Waveshare repo | `30f3b23b3d4bb38d32f7d0cddffb66759668a855` | [`waveshareteam/ESP32-S3-Touch-AMOLED-2.06`](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-2.06/tree/30f3b23b3d4bb38d32f7d0cddffb66759668a855) |
 | Wardrive Go | `b30f16f`, 2.0.34 | fresh clone, `/tmp/wardrive-go`; finding 0.1 |
 | ESP-IDF | v5.5.2 (`~/esp/esp-idf`) | WardriveESP README asks for 5.5 |
 | Hardware | ESP32-S3 rev v0.2, 8 MB PSRAM, 32 MB flash | `esptool flash_id`, `/dev/ttyACM0` (`303a:1001`) |
@@ -81,7 +85,7 @@ Ordered by impact. Confidence in brackets.
   was not investigated (possibly the IDF patch level or a dev `-sd` config). This matters for the
   "no new warnings / no protocol change" comparison: compare against our own baseline, not the shipped bin.
 
-All `file:line` below are relative to `ref/wardrive-bridge-package/source/main/` unless prefixed.
+All `file:line` below are relative to `firmware/main/` at the 1.7.5 vendor commit `6b386b1` unless prefixed.
 
 ## 2. WardriveESP architecture (answers to Phase 1 questions 1–8)
 
@@ -239,7 +243,7 @@ the app also keys on `disp=`, but the app source is unavailable to confirm it (R
 
 ## 3. Waveshare reference (question 9)
 
-All of the following are from `ref/ESP32-S3-Touch-AMOLED-2.06` and checked by grep. "BSP" means
+All of the following are from the Waveshare repo at `30f3b23` (table in section 1) and checked by grep. "BSP" means
 `examples/factory/components/waveshare__esp32_s3_touch_amoled_2_06/`.
 
 **Panel**
@@ -385,8 +389,9 @@ The only phone-originated data is alerts and `iam`. The protocol has a `time` co
   - The fingerprint is now: I2C SDA 15 / SCL 14 both pulled up, the AXP2101 at 0x34 reading IC type 0x4A, and the
     other board-bus parts 0x18 / 0x40 / 0x51 / 0x6B all answering.
   - The user deferred the choice; this option was picked because it drives no pin before identification.
-- **D2, repo layout:** WardriveESP 1.7.5 is vendored into `firmware/`. The first commit is pristine, so the port
-  is a reviewable diff on top of it. `ref/` stays untouched.
+- **D2, repo layout:** WardriveESP is vendored into `firmware/`. Each upstream release is committed pristine on the
+  branch `vendor/wardriveesp` (1.7.5 `6b386b1`, 1.7.6 `d633973`) and merged, so the port stays a reviewable diff on top
+  of upstream. Reference material is cited by repository and commit (section 1), not kept in this repo.
 - **D3, protocol:** no new `WD:` lines, keys or commands. Only the values of the existing `board=`, `board_name=`,
   `disp=` and `batt=` keys change. Watch-only statistics stay on the screen and in the serial log.
 - **D4, offline SD logging:** out of scope. There is no GPS, and upstream's design excludes boards without one.

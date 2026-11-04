@@ -28,7 +28,8 @@ Expected:
 ## Flash
 
 **The first flash erases the factory demo.** To restore it, use Waveshare's image (16 MB, written at `0x0`):
-`ref/ESP32-S3-Touch-AMOLED-2.06/firmware/ESP32-S3-Touch-AMOLED-2.06_FactoryOnly_20261016.bin`.
+[`firmware/ESP32-S3-Touch-AMOLED-2.06_FactoryOnly_20261016.bin`](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-2.06/raw/30f3b23b3d4bb38d32f7d0cddffb66759668a855/firmware/ESP32-S3-Touch-AMOLED-2.06_FactoryOnly_20261016.bin)
+in the Waveshare repo at `30f3b23`.
 
 ```sh
 python -m esptool --chip esp32s3 -p /dev/ttyACM0 erase_flash      # first time only

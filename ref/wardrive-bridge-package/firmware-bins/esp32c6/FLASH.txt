@@ -1,8 +1,0 @@
-WardriveESP for esp32c6 (requires esptool)
-
-Merged image:
-  esptool --chip esp32c6 -p <PORT> erase_flash
-  esptool --chip esp32c6 -p <PORT> -b 460800 write_flash 0x0 wardrive-bridge-merged.bin
-
-Separate parts (from this folder):
-  esptool --chip esp32c6 -p <PORT> -b 460800 write_flash @flash_args
