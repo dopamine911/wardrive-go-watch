@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#define MD_MAGIC 0x4D444731u   // "MDG1"; changes whenever memdiag_snap_t's layout changes
+#define MD_MAGIC 0x4D444732u   // "MDG2"; changes whenever memdiag_snap_t's layout changes (MDG1: no battery or wakes)
 
 // FNV-1a over the snapshot up to its checksum field, seeded so an all-zero slot never checks out.
 uint32_t memdiag_sum(const memdiag_snap_t *s) {
@@ -29,7 +29,6 @@ uint32_t memdiag_push(memdiag_ring_t *r, const memdiag_snap_t *s) {
     *d = *s;
     d->seq = r->next_seq++;
     if (r->next_seq == 0) r->next_seq = 1;   // 0 marks an empty slot
-    memset(d->reserved, 0, sizeof(d->reserved));
     d->sum = memdiag_sum(d);
     r->head = (r->head + 1) % MEMDIAG_N;
     return d->seq;
@@ -60,7 +59,8 @@ size_t memdiag_format(const memdiag_snap_t *s, char *buf, size_t n) {
                      "MD seq=%lu up=%lu heap=%lu heap_min_iv=%lu heap_min=%lu largest_min_iv=%lu "
                      "st_lcd=%d st_role=%d st_usb=%d st_health=%d st_btpwr=%d st_host=%d st_wifi=%d st_timer=%d "
                      "allocfail=%u twdt=%u lcd_frames=%u lcd_avg=%u lcd_worst=%u txdrop=%u qdrop=%u "
-                     "msys_min=%u/%u q_max=%u role=%u flags=%u aps=%lu sweeps=%lu",
+                     "msys_min=%u/%u q_max=%u role=%u flags=%u aps=%lu sweeps=%lu "
+                     "batt_mv=%u batt_pct=%d lit_s=%u wakes=%u wakes_touch=%u wakes_boot=%u",
                      (unsigned long)s->seq, (unsigned long)s->up_s, (unsigned long)s->heap_free,
                      (unsigned long)s->heap_min_iv, (unsigned long)s->heap_min_life, (unsigned long)s->largest_min_iv,
                      st(s->stack[MD_ST_LCD]), st(s->stack[MD_ST_ROLE]), st(s->stack[MD_ST_USB]),
@@ -69,7 +69,9 @@ size_t memdiag_format(const memdiag_snap_t *s, char *buf, size_t n) {
                      (unsigned)s->lcd_frames, (unsigned)s->lcd_avg_ms, (unsigned)s->lcd_worst_ms,
                      (unsigned)s->txdrop_iv, (unsigned)s->qdrop_iv, (unsigned)s->msys_min_iv, (unsigned)s->msys_total,
                      (unsigned)s->q_max_iv, (unsigned)s->role, (unsigned)s->flags, (unsigned long)s->aps,
-                     (unsigned long)s->sweeps);
+                     (unsigned long)s->sweeps, (unsigned)s->batt_mv,
+                     s->batt_pct == MEMDIAG_NO_BATT ? -1 : (int)s->batt_pct, (unsigned)s->lit_s_iv,
+                     (unsigned)s->wakes_iv, (unsigned)s->wakes_touch_iv, (unsigned)s->wakes_boot_iv);
     if (k < 0 || (size_t)k >= n) { if (n) buf[0] = '\0'; return 0; }
     return (size_t)k;
 }

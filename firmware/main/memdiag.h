@@ -15,8 +15,10 @@
 /// Stack high-water marks (bytes never used), in this order.
 enum { MD_ST_LCD = 0, MD_ST_ROLE, MD_ST_USB, MD_ST_HEALTH, MD_ST_BTPWR, MD_ST_HOST, MD_ST_WIFI, MD_ST_TIMER, MD_ST_N };
 
-/// Link and screen state bits.
-enum { MD_F_BLE = 1, MD_F_NOTIFY = 2, MD_F_USB = 4, MD_F_DARK = 8, MD_F_SCANNING = 16 };
+/// Link, screen and power state bits.
+enum { MD_F_BLE = 1, MD_F_NOTIFY = 2, MD_F_USB = 4, MD_F_DARK = 8, MD_F_SCANNING = 16, MD_F_USB_POWER = 32,
+       MD_F_CHARGING = 64 };
+#define MEMDIAG_NO_BATT 0xFF          // batt_pct when the level isn't known
 
 typedef struct {
     uint32_t seq;                 // 1, 2, ... across resets (0 = empty slot)
@@ -37,7 +39,12 @@ typedef struct {
     uint8_t  q_max_iv;            // deepest the Bluetooth or capture queue got in this interval
     uint8_t  role;                // 0 Wi-Fi, 1 Bluetooth, 2 capture, 3 CSI
     uint8_t  flags;               // MD_F_*
-    uint8_t  reserved[3];
+    uint8_t  batt_pct;            // the power chip's battery percent, MEMDIAG_NO_BATT if unknown
+    uint8_t  wakes_iv;            // screen wakes in this interval (all causes)
+    uint8_t  wakes_touch_iv;      // of which by a finger on the panel
+    uint8_t  wakes_boot_iv;       // of which by the BOOT button (the rest were alerts)
+    uint16_t batt_mv;             // battery voltage, 0 if unknown
+    uint16_t lit_s_iv;            // seconds the screen was lit in this interval
     uint32_t aps;                 // unique APs since boot
     uint32_t sweeps;              // Wi-Fi sweeps since boot
     uint32_t sum;                 // checksum over everything above

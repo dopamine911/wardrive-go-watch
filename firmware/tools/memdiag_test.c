@@ -92,10 +92,28 @@ int main(void) {
     size_t n = memdiag_format(&s, line, sizeof(line));
     CHECK(n > 0 && n == strlen(line));
     CHECK(strstr(line, "MD seq=7 up=3600 ") == line);
-    CHECK(strstr(line, " st_role=-1 ") && strstr(line, " st_lcd=1000 ") && strstr(line, " sweeps=0"));
+    CHECK(strstr(line, " st_role=-1 ") && strstr(line, " st_lcd=1000 ") && strstr(line, " sweeps=0 "));
+    // Power fields: an unknown battery level prints -1, the rest as given
+    s.batt_pct = MEMDIAG_NO_BATT;
+    s.batt_mv = 3806; s.lit_s_iv = 42; s.wakes_iv = 5; s.wakes_touch_iv = 3; s.wakes_boot_iv = 1;
+    n = memdiag_format(&s, line, sizeof(line));
+    CHECK(n > 0 && strstr(line, " batt_mv=3806 batt_pct=-1 lit_s=42 wakes=5 wakes_touch=3 wakes_boot=1"));
+    s.batt_pct = 14;
+    CHECK(memdiag_format(&s, line, sizeof(line)) > 0 && strstr(line, " batt_pct=14 "));
     char small[40];
     memset(small, 'x', sizeof(small));
     CHECK(memdiag_format(&s, small, sizeof(small)) == 0 && small[0] == '\0');
+    // The longest possible line still fits the firmware's 512-byte line buffer (a line that doesn't fit is dropped)
+    memdiag_snap_t big;
+    memset(&big, 0xFF, sizeof(big));
+    for (int i = 0; i < MD_ST_N; i++) big.stack[i] = MEMDIAG_NO_TASK - 1;
+    big.batt_pct = 100;
+    CHECK(memdiag_format(&big, line, 512) > 0);
+
+    // A ring left in RTC memory by an older layout is not trusted (its entries would be misread)
+    memdiag_ring_init(&r);
+    r.magic = 0x4D444731u;   // "MDG1", the layout before the battery and wake fields
+    CHECK(!memdiag_ring_valid(&r));
 
     if (!fails) printf("memdiag: all checks passed (snapshot %zu bytes, ring %zu bytes)\n", sizeof(memdiag_snap_t),
                        sizeof(memdiag_ring_t));

@@ -203,6 +203,9 @@ static volatile uint16_t s_diag_frames, s_diag_avg_ms, s_diag_worst_ms;
 static volatile bool s_diag_log = true;     // the "lcd:" log line (off: a stack mark without that call in it)
 static int s_tx, s_ty;
 static uint32_t s_poll_at, s_touch_at;      // last touch poll, last time a finger was down
+static volatile uint32_t s_boot_at;         // last BOOT press (0 = none): tells a BOOT wake from an alert's
+// Power diagnostics (lcd_diag_power): panel wakes by cause, and how long it has been lit, since boot.
+static volatile uint32_t s_wakes, s_wakes_touch, s_wakes_boot, s_lit_ms;
 static void touch_tick(uint32_t now);
 
 // Channel activity from AP sightings (14 × 2.4 GHz, then 28 × 5 GHz). The counts themselves come from apcount via the
@@ -620,6 +623,7 @@ static void boot_button_tick(uint32_t now) {
     if (!released || now - low_at < BOOT_BTN_DEBOUNCE_MS) return;
     released = false;
     s_touch_at = now;          // counts as a touch: wakes the panel, restarts the screen-off timer
+    s_boot_at = now | 1;       // the wake (if this press woke the panel) is BOOT's, not an alert's
     if (!s_scan || !s_frame.st.can_scan) { ESP_LOGI(TAG, "watch: BOOT pressed, no host listening"); return; }
     ESP_LOGI(TAG, "watch: BOOT, mode after %s", s_frame.st.mode);
     s_scan(LCD_SCAN_NEXT_MODE);
@@ -648,8 +652,11 @@ static void lcd_task(void *arg) {
     uint32_t diag_at = now_ms(), frames = 0, strips = 0;
     int64_t draw_us = 0, worst_us = 0, gather_us = 0;
     lcd_frame_t *f = &s_frame;
+    uint32_t prev = now_ms();
     for (;;) {
         uint32_t now = now_ms();
+        if (!dark) s_lit_ms += now - prev;   // time the panel was lit since the last pass
+        prev = now;
         touch_tick(now);
         bool alert = (int32_t)(s_alert_until - now) > 0;
         if (alert) last_active = now;
@@ -666,10 +673,17 @@ static void lcd_task(void *arg) {
 #if CONFIG_IDF_TARGET_ESP32S3
             if (!dark) s_wake_finger = s_down;
 #endif
-            if (s_touch && !s_stealth) {
-                if (dark) ESP_LOGI(TAG, "lcd: screen off (no touch for %u s)", s_sleep_s);
-                else if (s_down) ESP_LOGI(TAG, "lcd: screen on (touch at %d,%d)", s_tx, s_ty);
-                else ESP_LOGI(TAG, "lcd: screen on (alert)");
+            if (!dark) {   // why it woke: a finger on the panel, the BOOT button (just pressed), or an alert
+                bool boot = !s_down && s_boot_at && now - s_boot_at < 200;
+                s_wakes++;
+                if (s_down) s_wakes_touch++;
+                else if (boot) s_wakes_boot++;
+                if (s_touch && !s_stealth) {
+                    if (s_down) ESP_LOGI(TAG, "lcd: screen on (touch at %d,%d)", s_tx, s_ty);
+                    else ESP_LOGI(TAG, "lcd: screen on (%s)", boot ? "BOOT" : "alert");
+                }
+            } else if (s_touch && !s_stealth) {
+                ESP_LOGI(TAG, "lcd: screen off (no touch for %u s)", s_sleep_s);
             }
         }
         if (dark) { vTaskDelay(pdMS_TO_TICKS(s_touch ? DARK_POLL_MS : FRAME_MS)); continue; }   // the finger and BOOT still polled
@@ -765,6 +779,10 @@ void lcd_diag_last(uint16_t *frames, uint16_t *avg_ms, uint16_t *worst_ms) {
 }
 void lcd_diag_log(bool on) { s_diag_log = on; }
 void lcd_bench_touch(void) { s_touch_at = now_ms(); }
+void lcd_diag_power(lcd_power_diag_t *d) {
+    d->wakes = s_wakes; d->wakes_touch = s_wakes_touch; d->wakes_boot = s_wakes_boot; d->lit_ms = s_lit_ms;
+    d->bright_pct = s_bright_pct; d->sleep_s = s_sleep_s;
+}
 
 // ── microSD slot (the Koko V8 / AWOK Dual C5 layout: card on CS 10 of the panel's bus) ──
 bool lcd_sd_slot(int *host, int *cs) {

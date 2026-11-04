@@ -5272,6 +5272,7 @@ static memdiag_acc_t s_md_acc;
 static volatile uint32_t s_md_allocfail, s_md_allocfail_size, s_md_allocfail_caps;
 static volatile uint32_t s_md_twdt;
 static uint32_t s_md_txdrop_seen, s_md_qdrop_seen, s_md_capdrop_seen;
+static lcd_power_diag_t s_md_pw_seen;   // screen wakes and lit time at the last committed snapshot
 static bool s_md_kept;
 
 static void md_alloc_failed(size_t size, uint32_t caps, const char *fn) {
@@ -5356,7 +5357,24 @@ static void md_snapshot(memdiag_snap_t *s, bool commit) {
                ((s_streaming || s_bt_running || s_cap_running || s_csi_running) ? MD_F_SCANNING : 0);
     s->aps = apc_session();
     s->sweeps = s_sweeps;
-    if (commit) { s_md_txdrop_seen = tx; s_md_qdrop_seen = qd; s_md_capdrop_seen = cd; }
+    // Power: the battery as last read (every 30 s), the charge state (every 2 s, watch only), and the screen's wakes
+    // and lit time in this interval.
+    int pct = s_has_batt ? s_batt_pct : -1;
+    s->batt_pct = pct < 0 ? MEMDIAG_NO_BATT : (uint8_t)pct;
+    s->batt_mv = s_has_batt && s_batt_mv > 0 ? md_u16((uint32_t)s_batt_mv) : 0;
+#if CONFIG_IDF_TARGET_ESP32S3
+    if (s_charge != LCD_CHARGE_NONE) s->flags |= MD_F_USB_POWER;
+    if (s_charge == LCD_CHARGE_ON) s->flags |= MD_F_CHARGING;
+#endif
+    lcd_power_diag_t pw;
+    lcd_diag_power(&pw);
+    uint32_t wakes = pw.wakes - s_md_pw_seen.wakes, touch = pw.wakes_touch - s_md_pw_seen.wakes_touch;
+    uint32_t boot = pw.wakes_boot - s_md_pw_seen.wakes_boot;
+    s->wakes_iv = (uint8_t)(wakes > 255 ? 255 : wakes);
+    s->wakes_touch_iv = (uint8_t)(touch > 255 ? 255 : touch);
+    s->wakes_boot_iv = (uint8_t)(boot > 255 ? 255 : boot);
+    s->lit_s_iv = md_u16((pw.lit_ms - s_md_pw_seen.lit_ms) / 1000);
+    if (commit) { s_md_txdrop_seen = tx; s_md_qdrop_seen = qd; s_md_capdrop_seen = cd; s_md_pw_seen = pw; }
 }
 
 /// Once a second from wd_health.
@@ -5389,12 +5407,15 @@ static void md_command(const char *s) {
     if (!strcmp(s, "diag")) {
         md_snapshot(&snap, false);
         if ((n = memdiag_format(&snap, line, sizeof(line)))) md_out(line, n, sizeof(line), pdMS_TO_TICKS(100));
+        lcd_power_diag_t pw;
+        lcd_diag_power(&pw);
         n = (size_t)snprintf(line, sizeof(line), "MD now allocfail_last=%lu caps=0x%lx reset=%d ring=%s next_seq=%lu "
-                             "internal_total=%u largest_now=%u",
+                             "internal_total=%u largest_now=%u bright=%u screen_off_s=%u wakes_total=%lu lit_s_total=%lu",
                              (unsigned long)s_md_allocfail_size, (unsigned long)s_md_allocfail_caps,
                              (int)esp_reset_reason(), s_md_kept ? "kept" : "new", (unsigned long)s_md_ring.next_seq,
                              (unsigned)heap_caps_get_total_size(MALLOC_CAP_INTERNAL),
-                             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+                             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL), (unsigned)pw.bright_pct,
+                             (unsigned)pw.sleep_s, (unsigned long)pw.wakes, (unsigned long)(pw.lit_ms / 1000));
         md_out(line, n, sizeof(line), pdMS_TO_TICKS(100));
         return;
     }
