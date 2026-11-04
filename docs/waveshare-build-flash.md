@@ -143,3 +143,31 @@ wdusb bye
 The chip then keeps the time across resets (`clock set from rtc` in the boot log). The face shows it in `WATCH_TZ`
 (default America/Chicago): for another zone edit that `#define` next to `watch_clock_init()` in
 `main/wardrive_bridge.c` to a POSIX TZ rule and rebuild (verification O14).
+
+## Releases and the web flasher
+
+`.github/workflows/release.yml` runs on a tag `v<FW_VERSION>-watch.<n>` (for example `v1.7.6-watch.1`; a tag that
+doesn't match `FW_VERSION` fails the run). It:
+
+1. runs the host tests;
+2. builds the S3 image with ESP-IDF v5.5.2 in Espressif's container, from `sdkconfig.defaults` (the same configuration
+   as the local `build-esp32s3`, checked: identical `sdkconfig`, identical image size);
+3. attaches `wardrive-go-watch-<version>-esp32s3-merged.bin` and `SHA256SUMS` to a GitHub Release;
+4. deploys the web flasher (`flasher/index.html` with ESP Web Tools) and that build's image parts to GitHub Pages.
+
+Run it by hand (Actions → Release → Run workflow) to redeploy the flasher from a branch without making a release.
+One-time setup in the repository: Settings → Pages → Source: **GitHub Actions**.
+
+The flasher writes the bootloader, partition table, OTA data and app at their own offsets (`tools/package_flasher.py`
+reads them from `flash_args`). The release's merged image is one contiguous file from `0x0`, so it also overwrites
+the NVS partition between them: flashing it clears the saved brightness, screen-off time and boot counter (the clock
+chip is separate and keeps the time).
+
+To try the flasher locally before a release (Web Serial accepts `localhost` without https):
+
+```sh
+python3 tools/package_flasher.py build-esp32s3 ../flasher /tmp/flasher-site "local"
+cd /tmp/flasher-site && python3 -m http.server 8642 --bind 127.0.0.1    # then open http://127.0.0.1:8642
+```
+
+The browser holds the serial port until the flasher tab closes.

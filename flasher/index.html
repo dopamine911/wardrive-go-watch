@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wardrive Go Watch: web flasher</title>
+  <meta name="description" content="Install WardriveESP with watch support on the Waveshare ESP32-S3 Touch AMOLED 2.06 from your browser.">
+  <script type="module" src="https://unpkg.com/esp-web-tools@10.4.0/dist/web/install-button.js?module"></script>
+  <style>
+    :root { color-scheme: dark; --bg: #05070a; --panel: #0c1117; --edge: #1d2733; --fg: #e8eef5; --dim: #8a99a8;
+            --cyan: #00c8ff; --mag: #e040fb; --amber: #ffb020; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.55 system-ui, -apple-system, "Segoe UI",
+           Roboto, sans-serif; }
+    main { max-width: 760px; margin: 0 auto; padding: 40px 20px 64px; }
+    h1 { margin: 0 0 4px; font-size: 34px; letter-spacing: .04em;
+         background: linear-gradient(90deg, var(--cyan), var(--mag)); -webkit-background-clip: text;
+         background-clip: text; color: transparent; }
+    .sub { color: var(--dim); margin: 0 0 28px; }
+    .card { background: var(--panel); border: 1px solid var(--edge); border-radius: 14px; padding: 20px 22px;
+            margin: 0 0 18px; }
+    h2 { font-size: 18px; margin: 0 0 10px; }
+    ol { margin: 0; padding-left: 22px; }
+    li { margin: 6px 0; }
+    code { background: #111a24; border: 1px solid var(--edge); border-radius: 6px; padding: 1px 6px; font-size: 14px; }
+    a { color: var(--cyan); }
+    .install { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+    .version { color: var(--dim); font-size: 14px; }
+    .warn { border-color: #5a4310; }
+    .warn h2 { color: var(--amber); }
+    .note { color: var(--dim); font-size: 14px; }
+    esp-web-install-button button[slot="activate"] { background: var(--cyan); color: #00131a; border: 0;
+      border-radius: 10px; padding: 12px 22px; font-size: 16px; font-weight: 700; cursor: pointer; }
+    .bad { color: var(--amber); }
+    .previews { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 6px; }
+    .previews img { width: 140px; border-radius: 22px; border: 1px solid var(--edge); }
+  </style>
+</head>
+<body>
+<main>
+  <h1>WARDRIVE GO WATCH</h1>
+  <p class="sub">WardriveESP with watch support, for the Waveshare ESP32-S3 Touch AMOLED 2.06. Install it from this
+    page, then pair it with the Wardrive Go app.</p>
+
+  <section class="card">
+    <h2>1. Install</h2>
+    <div class="install">
+      <esp-web-install-button manifest="manifest.json">
+        <button slot="activate">Connect and install</button>
+        <span slot="unsupported" class="bad">This browser can't flash devices. Use Chrome or Edge on a desktop
+          computer (Web Serial).</span>
+        <span slot="not-allowed" class="bad">Web Serial needs a secure page: open this site over https.</span>
+      </esp-web-install-button>
+      <span class="version" id="version"></span>
+    </div>
+    <ol>
+      <li>Plug the watch into this computer with a USB-C <b>data</b> cable.</li>
+      <li>Click <b>Connect and install</b> and pick the watch's port: <code>USB JTAG/serial debug unit</code>
+        (<code>/dev/ttyACM0</code> on Linux, a <code>COM</code> port on Windows).</li>
+      <li>Choose <b>Install</b>. On the first install, tick <b>Erase device</b>: that removes Waveshare's factory demo.
+        For an update, leave it unticked to keep your brightness and screen-off settings.</li>
+      <li>Wait for <b>Installation complete</b>. The watch restarts on its own and shows the clock face.</li>
+    </ol>
+    <p class="note">If the port doesn't appear, the cable may be charge-only. On Linux your user needs access to the
+      port (usually the <code>dialout</code> group).</p>
+  </section>
+
+  <section class="card">
+    <h2>2. Pair with Wardrive Go</h2>
+    <ol>
+      <li>Turn Bluetooth on and open <b>Wardrive Go</b>
+        (<a href="https://play.google.com/store/apps/details?id=com.rocketgod.wardrive">Google Play</a> ·
+        <a href="https://apps.apple.com/app/id6783390938">App Store</a>). Keep it in the foreground.</li>
+      <li>The watch advertises as <code>WardriveESP-XXXX</code>. There's no pairing in the phone's Bluetooth settings:
+        the app finds it and links by itself.</li>
+      <li>On the watch, swipe to the dashboard: the status pill shows <b>BLE</b> and your phone's name, and
+        <b>SCAN WIFI</b> reads <b>ON</b>.</li>
+    </ol>
+    <div class="previews">
+      <img src="https://raw.githubusercontent.com/dopamine911/wardrive-go-watch/main/docs/previews/w14-clock.png" alt="Clock face">
+      <img src="https://raw.githubusercontent.com/dopamine911/wardrive-go-watch/main/docs/previews/w2-dashboard.png" alt="Dashboard, linked and scanning">
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>3. Set the clock once</h2>
+    <p>A new watch's clock face reads <b>NO TIME YET</b>, because Wardrive Go doesn't send the time. Set it once from a
+      computer: see the
+      <a href="https://github.com/dopamine911/wardrive-go-watch/blob/main/docs/user-guide.md#3-set-the-clock">user
+      guide</a>. The watch's clock chip keeps it after that, through restarts, updates and even a full erase (the chip
+      is separate from the flash).</p>
+  </section>
+
+  <section class="card warn">
+    <h2>Don't update the watch from the app or the rocketgod.dev flasher</h2>
+    <p>They install the published ESP32-S3 image, which doesn't drive the watch's screen. If that happens, install
+      again from this page.</p>
+  </section>
+
+  <p class="note">Firmware: <a href="https://rocketgod.dev/WardriveESP/">WardriveESP</a> by RocketGod, with watch
+    support from <a href="https://github.com/dopamine911/wardrive-go-watch">wardrive-go-watch</a> (MIT). Flashing by
+    <a href="https://esphome.github.io/esp-web-tools/">ESP Web Tools</a>. Scan and capture only networks you own or have
+    permission to test.</p>
+</main>
+<script>
+  fetch("manifest.json").then(r => r.json()).then(m => {
+    document.getElementById("version").textContent = "Firmware " + m.version;
+  }).catch(() => {});
+</script>
+</body>
+</html>

@@ -1,0 +1,119 @@
+# Release: on a version tag, test, build the ESP32-S3 image with ESP-IDF v5.5.2, attach it to a GitHub Release and
+# deploy the web flasher (flasher/) with that build to GitHub Pages.
+# Run by hand (Actions -> Release -> Run workflow) to rebuild and redeploy the flasher from a branch without a release.
+#
+# One-time setup: Settings -> Pages -> Source: "GitHub Actions".
+# Tags: v<FW_VERSION>-watch.<n>, e.g. v1.7.6-watch.1 (checked against FW_VERSION in wardrive_bridge.c).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # create the release
+  pages: write
+  id-token: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IDF_VERSION: v5.5.2
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Version
+        id: version
+        run: |
+          fw=$(sed -n 's/^#define FW_VERSION *"\(.*\)"/\1/p' firmware/main/wardrive_bridge.c)
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            case "${GITHUB_REF_NAME}" in
+              "v${fw}-watch."*) ;;
+              *) echo "::error::tag ${GITHUB_REF_NAME} doesn't match FW_VERSION ${fw} (expected v${fw}-watch.N)"; exit 1 ;;
+            esac
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="${fw}-watch+$(git rev-parse --short HEAD)"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Version: ${version}"
+
+      - name: Host tests
+        working-directory: firmware
+        run: |
+          set -e
+          for t in netlog gesture rtc_pcf memdiag; do
+            cc -O2 -Wall -Wextra -Werror -I main "tools/${t}_test.c" "main/${t}.c" -o "/tmp/${t}_test"
+            "/tmp/${t}_test"
+          done
+          cc -O2 -I main tools/apcount_test.c main/apcount.c -o /tmp/apcount_test -lm
+          /tmp/apcount_test
+
+      - name: Build (ESP-IDF, esp32s3)
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: ${{ env.IDF_VERSION }}
+          target: esp32s3
+          path: firmware
+          command: >-
+            idf.py -B build -D SDKCONFIG=build/sdkconfig set-target esp32s3 &&
+            idf.py -B build -D SDKCONFIG=build/sdkconfig build &&
+            idf.py -B build -D SDKCONFIG=build/sdkconfig merge-bin -o merged.bin
+
+      - name: Package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -e
+          mkdir -p dist
+          cp firmware/build/merged.bin "dist/wardrive-go-watch-${VERSION}-esp32s3-merged.bin"
+          (cd dist && sha256sum ./*.bin > SHA256SUMS)
+          python3 firmware/tools/package_flasher.py firmware/build flasher site "${VERSION}"
+          ls -l dist site site/firmware
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: firmware
+          path: dist/
+
+      - name: Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+        run: |
+          cat > notes.md <<EOF
+          WardriveESP with Waveshare ESP32-S3 Touch AMOLED 2.06 support.
+
+          **Install from the browser:** ${PAGES_URL} (Chrome or Edge on a desktop computer).
+
+          **Or with esptool.** The merged image starts at 0x0 and also clears the watch's saved settings
+          (brightness, screen-off time); the clock chip keeps the time:
+          \`python -m esptool --chip esp32s3 -p <port> write_flash 0x0 <file>-merged.bin\`
+
+          Don't update the watch from Wardrive Go or the rocketgod.dev flasher: they install the published ESP32-S3
+          image, which doesn't drive the watch's screen.
+          EOF
+          gh release create "${GITHUB_REF_NAME}" dist/* --title "${GITHUB_REF_NAME}" --verify-tag --notes-file notes.md
+
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

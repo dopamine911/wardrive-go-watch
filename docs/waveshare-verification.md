@@ -190,3 +190,13 @@ Full records: `docs/memory-audit.md` (architecture, allocations, PSRAM and parti
 | 58 | `lcd_draw.c` at `-O2`, S3 only (`a2c0fc3`) | pass | AUTO: 76 scenes byte-identical at -Og and -O2. HW-LOG: alert paint 162 → 117 ms, frame 198 → 148 ms; `wd_lcd` 1,856–1,904 left |
 | 59 | Regression, default image | pass | HW-LOG: `fw=1.7.6`, clock from the chip, battery, touch, phone link and Wi-Fi stream, BOOT ×3 through Bluetooth and capture, screen off and on; no `WD:` change since `a406ec3`. HW-EYE: "all normal" |
 | 60 | Thirty-minute soaks (Wi-Fi display on/off, Bluetooth, capture) | NOT RUN | scheduled; procedure in `memory-soak-results.md` section 3 |
+
+## Web flasher and releases (2026-11-03)
+
+| # | Check | Result | Evidence |
+|---|---|---|---|
+| 61 | A clean build is the tested build | pass | BUILD: `set-target esp32s3` from `sdkconfig.defaults` in a fresh tree gives an `sdkconfig` identical to `build-esp32s3`'s and the same image size (0x1502E0) |
+| 62 | The release's merged image boots | pass | HW-LOG: `write_flash 0x0` of the 1,508,064-byte merged image, then `fw=1.7.6`, board, clock from the chip, battery, touch, phone linked. Also seen: `boots=1 prev_fw=?`, because the merged image overwrote NVS (documented) |
+| 63 | Install from the web flasher, then pair | pass | HW-EYE: the user installed through the flasher (served locally, `http://127.0.0.1:8642`) in their browser with **Erase device** ticked, and Wardrive Go linked. HW-LOG after the browser released the port: `fw=1.7.6`, clock from the chip, `phone connected`, `notifications on`, `stream started`. Page check (headless Chromium): ESP Web Tools loaded, Web Serial available, manifest read, no console errors |
+| 64 | Release workflow | partly checked | AUTO: `actionlint` clean; the Version (good tag, mismatched tag, branch), Package and release-notes steps run locally against the clean build. NOT RUN on GitHub yet: needs Pages enabled and a tag |
+| 65 | The deployed site (GitHub Pages, https) | NOT RUN | after the first release |

@@ -31,13 +31,30 @@ control and mode, then covers troubleshooting and known limitations.
 | [Waveshare ESP32-S3 Touch AMOLED 2.06](https://www.waveshare.com/esp32-s3-touch-amoled-2.06.htm) | ESP32-S3 with a 410×502 AMOLED touch screen, an AXP2101 power chip, a PCF85063 clock chip and a BOOT button. See the [Waveshare wiki](https://www.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-2.06). |
 | USB-C **data** cable | Charge-only cables don't show up as a serial port. |
 | A phone with Wardrive Go | [Google Play](https://play.google.com/store/apps/details?id=com.rocketgod.wardrive) or [App Store](https://apps.apple.com/app/id6783390938). Tested so far with the Android store build only. |
-| A computer with ESP-IDF 5.5 | Needed to build and flash, and to set the clock once. Tested with **v5.5.2**. [Install guide](https://docs.espressif.com/projects/esp-idf/en/v5.5.2/esp32s3/get-started/index.html). |
+| A computer | For the browser install: Chrome or Edge on a desktop (Web Serial). To build it yourself: ESP-IDF 5.5, tested with **v5.5.2** ([install guide](https://docs.espressif.com/projects/esp-idf/en/v5.5.2/esp32s3/get-started/index.html)). Either way, also used to set the clock once. |
 
-There's no prebuilt watch image yet, so you build it yourself. The official flashers (the
-[web flasher](https://rocketgod.dev/WardriveESP/) and the app's USB flasher) install the stock ESP32-S3 image, which
-doesn't drive the watch's screen.
+Install this project's image, either from its own [web flasher](https://dopamine911.github.io/wardrive-go-watch/)
+(§2.0, live from the first release on) or by building it (§2.1). The official WardriveESP flashers (the
+[rocketgod.dev web flasher](https://rocketgod.dev/WardriveESP/) and the app's USB flasher) install the stock ESP32-S3
+image, which doesn't drive the watch's screen.
 
 ## 2. Install the firmware
+
+### 2.0 Install from the browser
+
+1. Open the [web flasher](https://dopamine911.github.io/wardrive-go-watch/) in Chrome or Edge on a desktop computer.
+2. Plug the watch in with a USB-C data cable, click **Connect and install** and pick the watch's port (`USB
+   JTAG/serial debug unit`).
+3. Choose **Install**. On the first install tick **Erase device** (it removes Waveshare's factory demo); for an update
+   leave it unticked to keep the brightness and screen-off settings. The clock chip keeps the time either way.
+4. When it says **Installation complete**, the watch restarts on the clock face. Then link Wardrive Go (§4).
+
+The browser keeps the serial port open until you close the flasher tab. Close it before using the port from anything
+else (the clock script in §3, for example).
+
+Prefer a file? Each [release](https://github.com/dopamine911/wardrive-go-watch/releases) has a merged image for
+esptool: `python -m esptool --chip esp32s3 -p /dev/ttyACM0 write_flash 0x0 <file>-merged.bin`. It starts at `0x0` and so
+also clears the saved brightness and screen-off settings.
 
 ### 2.1 Build
 
@@ -360,12 +377,12 @@ press or an alert from the app turns the screen back on.
 > [!WARNING]
 > **Don't update the watch from Wardrive Go or the rocketgod.dev web flasher.** Both install the published ESP32-S3
 > image, which doesn't support the watch yet. The watch keeps scanning, but its screen goes blank until you flash this
-> firmware again over USB (§2.2).
+> firmware again (§2).
 
 <p align="center"><img src="previews/w10-update.png" width="180" alt="Firmware update progress screen"></p>
 
-To update, pull the latest code and repeat the build and flash steps (§2), without the erase. Your clock and screen
-settings carry over.
+To update, use this project's web flasher without **Erase device** (§2.0), or pull the latest code and repeat the build
+and flash steps (§2.1), without the erase. Your clock and screen settings carry over either way.
 
 If an update does arrive over Bluetooth, the watch shows a progress ring with **KEEP POWER ON**, then **INSTALLING**,
 and restarts by itself. If the screen was off when the update started, the progress screen only appears after the next
@@ -415,7 +432,8 @@ a session (`wdusb hello` … `wdusb bye`, opened without resetting the port, see
   GPS, so it can't log on its own.
 - **Wardrive Go doesn't set the time.** Set it once over USB (§3).
 - **The time zone is built in.** Changing it, including when you travel, means a rebuild.
-- **App and web-flasher updates remove watch support** until the official image includes it (§12).
+- **Updates from Wardrive Go or the rocketgod.dev web flasher remove watch support** until the official image includes
+  it (§12). This project's own web flasher (§2.0) is fine.
 - **2.4 GHz only.** The ESP32-S3 has no 5 GHz radio.
 - **Charging state stays on the watch.** The battery level reaches the app; whether it's charging doesn't.
 - **Tested setup:** one watch and one Android phone. iPhone and several boards linked at once are untested.

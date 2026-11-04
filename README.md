@@ -34,14 +34,17 @@ live dashboard on its own 410×502 AMOLED screen, and between sessions it's an o
    a USB-C data cable, and an Android or iOS phone with Wardrive Go
    ([Google Play](https://play.google.com/store/apps/details?id=com.rocketgod.wardrive) ·
    [App Store](https://apps.apple.com/app/id6783390938)).
-2. **Build and flash** with ESP-IDF 5.5:
-   ```sh
-   git clone https://github.com/dopamine911/wardrive-go-watch.git
-   cd wardrive-go-watch/firmware
-   . ~/esp/esp-idf/export.sh
-   idf.py -B build-esp32s3 -D SDKCONFIG=build-esp32s3/sdkconfig set-target esp32s3
-   idf.py -B build-esp32s3 -D SDKCONFIG=build-esp32s3/sdkconfig -p /dev/ttyACM0 build flash
-   ```
+2. **Install the firmware**, either way:
+   - **In the browser** (Chrome or Edge on a desktop): the
+     [web flasher](https://dopamine911.github.io/wardrive-go-watch/), live from the first release on.
+   - **Build and flash** with ESP-IDF 5.5:
+     ```sh
+     git clone https://github.com/dopamine911/wardrive-go-watch.git
+     cd wardrive-go-watch/firmware
+     . ~/esp/esp-idf/export.sh
+     idf.py -B build-esp32s3 -D SDKCONFIG=build-esp32s3/sdkconfig set-target esp32s3
+     idf.py -B build-esp32s3 -D SDKCONFIG=build-esp32s3/sdkconfig -p /dev/ttyACM0 build flash
+     ```
 3. **Set the clock once** over USB ([how](docs/user-guide.md#3-set-the-clock)).
 4. **Open Wardrive Go.** The watch advertises as `WardriveESP-XXXX`, and the app links to it and starts scanning.
 5. **Swipe** between pages, **hold** a control to change it, and **press BOOT** to step through the modes.
