@@ -82,6 +82,8 @@ long lcd_stack_free(void);
 bool lcd_dark(void);
 void lcd_diag_last(uint16_t *frames, uint16_t *avg_ms, uint16_t *worst_ms);
 void lcd_diag_log(bool on);
+/// Bench: counts as a touch for the screen-off timer (wakes the panel, keeps it lit), without pressing anything.
+void lcd_bench_touch(void);
 /// "240x320" / "128x128" / "410x502" while a screen runs, else "".
 const char *lcd_size(void);
 /// A Wi-Fi AP sighting (Wi-Fi scan or capture): unique count, "+new" ticker, channel activity.

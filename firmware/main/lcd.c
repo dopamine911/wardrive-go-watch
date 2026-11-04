@@ -764,6 +764,7 @@ void lcd_diag_last(uint16_t *frames, uint16_t *avg_ms, uint16_t *worst_ms) {
     *frames = s_diag_frames; *avg_ms = s_diag_avg_ms; *worst_ms = s_diag_worst_ms;
 }
 void lcd_diag_log(bool on) { s_diag_log = on; }
+void lcd_bench_touch(void) { s_touch_at = now_ms(); }
 
 // ── microSD slot (the Koko V8 / AWOK Dual C5 layout: card on CS 10 of the panel's bus) ──
 bool lcd_sd_slot(int *host, int *cs) {

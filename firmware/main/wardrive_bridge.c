@@ -3995,12 +3995,25 @@ static void run_command(const uint8_t *text, size_t len, uint8_t src) {
 }
 
 #if CONFIG_IDF_TARGET_ESP32S3
-/// The watch's SCAN and MODE buttons: exactly the commands the app itself sends (run like any command, under the command
-/// lock), so the board, the app and the log all see an ordinary stop / start or mode change. Pause: `stop` / `start`.
-/// Next mode: Wi-Fi -> Bluetooth (`bt on`) -> capture (`cap on`) -> Wi-Fi (`cap off`). Called on the screen task.
+/// The watch's SCAN and MODE buttons (and BOOT): exactly the commands the app itself sends, so the board, the app and the
+/// log all see an ordinary stop / start or mode change. Pause: `stop` / `start`. Next mode: Wi-Fi -> Bluetooth
+/// (`bt on`) -> capture (`cap on`) -> Wi-Fi (`cap off`).
+/// The screen task only hands the press over; wd_health runs it (ble_cmds_for), where the phone's commands run. Run on
+/// the screen task, a mode switch took its 4 KB stack down to 1,060 bytes left and held the screen while the radio
+/// changed role (docs/memory-baseline.md). One press waits at most: a press while one is still waiting replaces it.
+static volatile int8_t s_watch_req = -1;   // lcd_scan_action_t waiting for wd_health, -1 = none
+
 static void watch_scan(lcd_scan_action_t action) {
+    s_watch_req = (int8_t)action;
+    if (s_health_task) xTaskNotifyGive(s_health_task);
+}
+
+static void watch_scan_run(void) {
+    int8_t a = s_watch_req;
+    if (a < 0) return;
+    s_watch_req = -1;
     const char *c;
-    if (action == LCD_SCAN_NEXT_MODE) c = s_role == ROLE_WIFI ? "bt on" : s_role == ROLE_BT ? "cap on" : "cap off";
+    if (a == LCD_SCAN_NEXT_MODE) c = s_role == ROLE_WIFI ? "bt on" : s_role == ROLE_BT ? "cap on" : "cap off";
     else c = (s_streaming || s_bt_running || s_cap_running || s_csi_running) ? "stop" : "start";
     run_command((const uint8_t *)c, strlen(c), SINK_BLE);
 }
@@ -4773,6 +4786,9 @@ static void ble_cmds_for(uint32_t ms) {
             handle_command(s_cmd_ring[i], s_cmd_ring_len[i]);
             s_cmd_tail++;
         }
+#if CONFIG_IDF_TARGET_ESP32S3
+        watch_scan_run();   // the watch's buttons (watch_scan): here, not on the screen task
+#endif
         int64_t left = (end - esp_timer_get_time()) / 1000;
         if (left <= 0) return;
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS((uint32_t)left));
@@ -5421,8 +5437,12 @@ static void md_command(const char *s) {
     } else if (!strcmp(s, "bench lcdlog 0") || !strcmp(s, "bench lcdlog 1")) {
         lcd_diag_log(s[13] == '1');
         reply = s[13] == '1' ? "MD lcdlog on" : "MD lcdlog off";
+    } else if (!strcmp(s, "bench wake")) {
+        lcd_bench_touch();
+        reply = "MD bench wake";
     } else {
-        reply = "MD usage: diag | diag dump | diag clear | bench mode | bench alert | bench drop | bench lcdlog 0|1";
+        reply = "MD usage: diag | diag dump | diag clear | bench mode | bench alert | bench drop | bench wake | "
+                "bench lcdlog 0|1";
     }
     n = (size_t)snprintf(line, sizeof(line), "%s", reply);
     md_out(line, n, sizeof(line), pdMS_TO_TICKS(100));
