@@ -213,3 +213,58 @@ Constraints: no new `WD:` keys (D3), nothing that blocks the scan or BLE paths, 
 
 The four 30-minute scenarios can run back to back in one ≈2 h session with the ring as the record (60 s interval ×
 96 entries = 96 min, dumped twice).
+
+## 12. PSRAM evaluation (Phase 5)
+
+| Question | Answer | Evidence |
+|---|---|---|
+| Is PSRAM initialized and recognized? | The chip has it; the firmware doesn't use it | esptool: embedded 8 MB (analysis finding 6); Waveshare's examples use octal mode. No `CONFIG_SPIRAM*` in the build (BUILD); `heap_caps_get_total_size(INTERNAL)` = 273,212 and nothing else (HW-LOG `MD now`) |
+| Does enabling it change boot or radio coexistence? | NOT RUN | No PSRAM image was built or flashed: the rows below show no need, and the shared-image risk stands regardless |
+| What could move? | Capture AP table 7,680, capture queue ≈8.3 KB, sighting lists ≈5 KB, frame copy ≈2 KB: ≈23 KB | section 7 |
+| What must stay internal? | LCD strip (DMA), SPI/QSPI/USB driver buffers, task stacks, ISR data, Wi-Fi/BT controller memory | section 7 |
+| Would it help? | Not now | Lowest free internal heap 62,008 (a capture start); largest block never below 31,744 against a largest run-time request of 10,240 (a task stack) and an OTA buffer that falls back from 24 KB; zero allocation failures in ≈1.5 h of stress (`memory-baseline.md`, `memory-soak-results.md`) |
+| Latency | Not measured | |
+
+Decision: **keep PSRAM off.** Enabling it is not watch-local: this firmware identifies the watch at run time inside
+the stock S3 image (D1), so `CONFIG_SPIRAM` would apply to every S3 board that image runs on; octal mode drives
+GPIO 33–37, which on a board without octal PSRAM may be wired to something else (R2). And any official update installs
+the published S3 image anyway (analysis R4). Revisit if the soak thresholds in `memory-soak-results.md` are crossed.
+
+## 13. Firmware size and partitions (Phase 7)
+
+| Image | Bytes | Share of a 0x1E0000 (1,966,080 B) slot |
+|---|---|---|
+| Pristine 1.7.5, S3 | 0xFF420 (1,045,536) | 53.2 % |
+| Pristine 1.7.6, S3 | 0xFFC30 (1,047,600) | 53.3 % |
+| This firmware, S3 (`ea697af`) | 0x14E620 (1,369,632) | 69.7 % — 596,448 B left |
+| Same, diagnostics image | 0x14F6B0 (1,373,872) | 69.9 % |
+| This firmware, S3, `lcd_draw.c` at -O2 (`a2c0fc3`) | 0x1502E0 (1,376,992) | 70.0 % — 589,088 B left |
+
+BUILD, all with ESP-IDF v5.5.2. Upstream grew 2,064 B from 1.7.5 to 1.7.6. The watch adds 322,032 B over pristine
+1.7.6: `libmain.a` +227 KB, of which `lcd_draw.c` (all scenes and both font sets) is 213 KB; the I2C, SPI, LEDC and RMT
+drivers +40 KB (RMT is the LED ring driver, reachable since the alert path was opened on S3; the watch has no ring);
+a pristine S3 image links none of the screen code.
+
+- **Growth threat:** none near-term. At upstream's last step the headroom lasts a very long time; a second watch
+  font set of the current size (≈114 KB) would still fit.
+- **OTA:** an update writes the next slot of the table already on the board and refuses a larger image
+  (`ota_begin`: `size > s_ota_part->size` → `WD:OTA error=bad_size`). Images are mapped by the MMU, so either slot
+  works.
+- **A larger table:** no practical benefit until the image nears 1.9 MB. It can't be delivered by OTA (the table is
+  not in an app image); the rocketgod.dev flasher writes its own merged image with the 4 MB table and erases the whole
+  flash (analysis finding 9), so a custom table would be undone by any official flash.
+
+Decision: **keep the partition table.** 28 MB of the 32 MB flash stays unused; that is not a problem to solve.
+
+## 14. Risks after measurement
+
+| # | Risk | Outcome | Evidence |
+|---|---|---|---|
+| R1 | Fragmentation stops a mode switch | not seen | 102 switches: every role started; largest block never below 31,744 |
+| R2 | PSRAM on the shared S3 image | avoided | section 12 |
+| R3 | Display stack headroom | fixed | 1,060 → 1,604 lowest (button commands moved to `wd_health`, `ea697af`) |
+| R4 | Silent task-watchdog events | none | `twdt=0` throughout |
+| R5 | Capture queue held while linked | confirmed, bounded | free heap 84 KB → 72–73 KB after the first capture, flat after; freed when the host unlinks (83.5 KB) |
+| R6 | Bluetooth record queue never freed | confirmed, bounded | part of the same 12 KB step; flat after |
+| R7 | Log loss in long captures | not reproduced | 10–26 min captures complete; `MD` sequence contiguous |
+| R8 | Screen task blocked by a mode switch | fixed with R3 | the switch now runs on `wd_health` |

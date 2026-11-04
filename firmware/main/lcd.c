@@ -447,7 +447,7 @@ static void window(int y0, int y1) {
 }
 
 // `lock`: take the bus for each changed strip only, so the microSD card (an offline run, or the app reading runs off it)
-// waits one strip at most, never a whole frame's drawing. The last strip may be partial (the watch: 502 = 31 x 16 + 6).
+// waits one strip at most, never a whole frame's drawing. The last strip may be partial (the watch: 502 = 62 x 8 + 6).
 // Returns how many strips went to the panel. Adds its own time to s_touch_us / s_paint_us / s_io_us (the bench log).
 static int64_t s_touch_us, s_paint_us, s_io_us;
 static int render(const lcd_frame_t *f, bool lock) {

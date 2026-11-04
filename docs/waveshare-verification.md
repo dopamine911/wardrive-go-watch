@@ -61,10 +61,10 @@ Nothing here comes from a simulator. Host tests cover only the hardware-independ
 | O8 | Battery charge state | closed (screen only, #52–54) | Shown on the watch from the AXP2101's status registers. Still not sent to the app: no existing `WD:` key carries it (D3). The "on USB, not charging" state (full) is drawn but not yet seen on hardware |
 | O5 | Sustained soak (≥30 min concurrent scan and render) | not run | acceptance check 6 in the analysis |
 | O6 | esp32c5 can't be built with the local IDF | upstream/toolchain | #3; needs the IDF release upstream uses |
-| O9 | Drawing a watch frame is slow on the chip | known, contained | HW-LOG: painting ~80–130 ms per dashboard frame (0.6 ms on a PC). Touch is followed between strips (#24), and the watch draws its data once a second (#29), so it costs ~10 % of one core. Alert frames run up to ~450 ms, so their blink is slower than the 250 ms design. Cause not pinned down (INFER: flash-cache misses on code and fonts) |
-| O10 | Long serial captures lose stretches of log | bench tooling | Captures of a minute or more sometimes stop receiving and deliver part of the backlog on the next open; the lost stretch is gone. Upstream logs through the ESP-IDF console when no USB session is open. Boot captures and short captures were reliable. Product behaviour is unaffected (the app path showed no gaps) |
+| O9 | Drawing a watch frame is slow on the chip | improved (#57–58) | Measured, not guessed: painting is CPU-bound (`memory-soak-results.md` section 4); the earlier INFER of flash-cache misses on fonts was wrong (glyphs are ≈11 % of the work). Alert worst frame 461 → 211 ms, dashboard paint 186 → 156 ms (`-Og`) and lower at `-O2`. Still above upstream's 125 ms alert-blink step (148 ms) |
+| O10 | Long serial captures lose stretches of log | not reproduced | Captures of 10–26 min on 2026-11-03 delivered every `MD` line (sequence numbers contiguous; they go through the USB driver) and every expected log line (e.g. 102 of 102 mode switches, 21/21/21 connect lines). Earlier losses stay unexplained |
 | O11 | A phone linked but not subscribed (Wardrive Go in the background) never starts the scan | upstream behaviour, now visible | HW-LOG: `phone connected` with no `notifications on` until the app was opened. The watch shows SCAN `WAITING` / `OPEN THE APP` for that state (#28) |
-| O12 | Screen task stack headroom | watch, unmeasured baseline | HW-LOG: `stack left 1024` of 4096 bytes after Bluetooth and capture runs (#36–37); no earlier figure to compare. INFER (0.6): the deepest call is the formatted diagnostic `ESP_LOGI` itself, unchanged by the per-mode pages. Watch it in the soak; raise the task stack if it drops |
+| O12 | Screen task stack headroom | closed (#55) | Measured worst case was a MODE/BOOT press running the role switch on `wd_lcd` (1,060 of 4,096 left); moved to `wd_health` (`ea697af`). Lowest since, across swipes, settings holds, alerts and presses with the log line on: 1,604 |
 | O13 | Wardrive Go doesn't send the time | upstream/app behaviour | HW-LOG: 40 s after the app linked, its commands were `wdstream`, `iam` and nothing else (no `time`). The chip starts blank, so the clock face reads NO TIME YET until the clock is set once over USB (docs/waveshare-build-flash.md "Set the clock"). After that the chip keeps it across resets. Not tested, and unknown: whether it keeps time when the battery runs flat and USB is out (which rail powers it wasn't read from the schematic) |
 | O14 | Timezone is compiled in | design limit | The chip and the board's clock hold UTC; the face shows it in `WATCH_TZ` (default America/Chicago, `CST6CDT,M3.2.0,M11.1.0`, from the host's tz database). Another zone, or travelling, needs the `#define` edited and a rebuild. DST switching is newlib's, not exercised yet (next change: 2027-03-14) |
 
@@ -174,4 +174,18 @@ good (`isVbusGood`); STATUS2 `0x01` bits 7:5 battery current, `01` charging (`is
 |---|---|---|---|
 | 52 | Charging is read | pass | HW-LOG at boot on USB: `watch: charging (power status 38 32)`, `battery AXP2101: 31%, 3929 mV, charging`. `38`: USB good, battery present; `32`: charging, constant-current phase |
 | 53 | Plug and unplug | pass | HW-EYE: bolt shown while charging, gone on unplug, back on replug (the serial log can't follow an unplug: USB is the port) |
-| 54 | Drawing | pass | AUTO/visual: `docs/previews/w17-clock-charging.png` (green bolt, green percent), `w18-dashboard-charging.png` (white bolt over the header's cell), `w19-dashboard-usb-full.png` and `w20-clock-usb-full.png` (dim bolt). BUILD: esp32s3 0x14e5d0; esp32c3/c6/c5 unchanged. Not seen on hardware: the full state (battery was at 31 %) |
+| 54 | Drawing | pass | AUTO/visual: `docs/previews/w17-clock-charging.png` (green bolt, green percent), `w18-dashboard-charging.png` (white bolt over the header's cell), `w19-dashboard-usb-full.png` and `w20-clock-usb-full.png` (dim bolt). BUILD: esp32s3 0x14e5d0; esp32c3/c6/c5 unchanged. Full state seen later: HW-LOG `on USB power, not charging (power status 28 14)` at 100 %, HW-EYE "all normal" (#59) |
+
+## Memory and stability (2026-11-03)
+
+Full records: `docs/memory-audit.md` (architecture, allocations, PSRAM and partition decisions), `docs/memory-baseline.md`
+(measured heap and stacks), `docs/memory-soak-results.md` (stress runs, thresholds, rendering).
+
+| # | Check | Result | Evidence |
+|---|---|---|---|
+| 55 | Screen task stack | pass after a fix | HW-LOG: 1,060 of 4,096 left when a MODE/BOOT press ran the role switch on `wd_lcd`; after moving it to `wd_health` (`ea697af`) the lowest seen is 1,604 (settings holds), 1,748 with presses, alerts and the log line |
+| 56 | Stress on hardware | pass | HW-LOG: 102 mode switches, 50 alerts, 20 of 20 BLE reconnects, 10 min of touch; 0 resets, 0 allocation failures, 0 task watchdog events, 0 `txdrop`; per-minute heap minimum within a 2 KB band for 67 min; lowest free heap 62,008, smallest largest block 31,744 |
+| 57 | Rounded-rectangle coverage decided per pixel first (`abfe4d9`) | pass | AUTO: 76 preview scenes byte-identical. HW-LOG: alert paint 286 → 162 ms, worst frame 461 → 244 ms; dashboard paint 186 → 156 ms |
+| 58 | `lcd_draw.c` at `-O2`, S3 only (`a2c0fc3`) | pass | AUTO: 76 scenes byte-identical at -Og and -O2. HW-LOG: alert paint 162 → 117 ms, frame 198 → 148 ms; `wd_lcd` 1,856–1,904 left |
+| 59 | Regression, default image | pass | HW-LOG: `fw=1.7.6`, clock from the chip, battery, touch, phone link and Wi-Fi stream, BOOT ×3 through Bluetooth and capture, screen off and on; no `WD:` change since `a406ec3`. HW-EYE: "all normal" |
+| 60 | Thirty-minute soaks (Wi-Fi display on/off, Bluetooth, capture) | NOT RUN | scheduled; procedure in `memory-soak-results.md` section 3 |

@@ -21,7 +21,7 @@ idf.py -B build-esp32s3 -D SDKCONFIG=build-esp32s3/sdkconfig build
 ```
 
 Expected:
-- `wardrive_bridge.bin binary size 0x14e5d0 bytes … (30%) free`.
+- `wardrive_bridge.bin binary size 0x1502e0 bytes … (30%) free`.
 - The same three `-Wunused-function` warnings the untouched upstream source has: `display.c text_c`,
   `wardrive_bridge.c led_apply`, `board_is_awok`.
 
@@ -90,10 +90,12 @@ The hardware-independent pieces build and run with the system compiler, from `fi
 ```sh
 cc -O2 -Wall -Wextra -I main tools/netlog_test.c main/netlog.c -o /tmp/netlog_test && /tmp/netlog_test
 cc -O2 -Wall -Wextra -I main tools/gesture_test.c main/gesture.c -o /tmp/gesture_test && /tmp/gesture_test
+cc -O2 -Wall -Wextra -I main tools/rtc_pcf_test.c main/rtc_pcf.c -o /tmp/rtc_pcf_test && /tmp/rtc_pcf_test
+cc -O2 -Wall -Wextra -I main tools/memdiag_test.c main/memdiag.c -o /tmp/memdiag_test && /tmp/memdiag_test
 cc -O2 -I main tools/apcount_test.c main/apcount.c -o /tmp/apcount_test -lm && /tmp/apcount_test   # upstream's
 ```
 
-The first two print `all checks passed` and exit 0, or name each failed check and exit 1.
+The first four print `all checks passed` and exit 0, or name each failed check and exit 1.
 
 The screens render to PPM images with the firmware's own drawing code; `-DLCD_WATCH=1` adds the watch's pages
 (`w*-410x502.ppm`, PNG copies in `docs/previews/`):
@@ -101,6 +103,16 @@ The screens render to PPM images with the firmware's own drawing code; `-DLCD_WA
 ```sh
 cc -O2 -DLCD_WATCH=1 -I main tools/lcd_preview.c main/lcd_draw.c -o /tmp/lcd_preview && /tmp/lcd_preview /tmp/out
 ```
+
+`tools/lcd_bench.c` times each watch scene through the same code (`-Og` like the firmware, or `-pg` with gprof for a
+per-function split).
+
+## Bench diagnostics image (memory and stability)
+
+A separate build with `CONFIG_WARDRIVEESP_MEMDIAG` (never publish it): heap, stacks, queues and faults once a minute
+as `MD` lines, a ring that survives a software reset, and `diag` / `bench` commands on the USB port without a session.
+Build, read and use it as in `docs/memory-baseline.md`; the stress procedures and tools (`tools/bench_serial.py`,
+`tools/bench_reconnect.py`, pyserial) are in `docs/memory-soak-results.md`.
 
 ## Watch fonts
 
