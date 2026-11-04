@@ -209,7 +209,11 @@ static void dashboard(const display_status_t *st, uint32_t now) {
     text(upx, 0, upb, 1, true);
 
     // rows 2-3: APs in range now in big digits, then the "+N" ticker, mode/channel and captures beside it
-    int right = big_number(0, 9, st->aps_live) + 6;
+    // past 99999 the digits are thousands with a K after them, so the column beside keeps its room
+    uint32_t live = st->aps_live;
+    int right = big_number(0, 9, live < 100000 ? live : live / 1000) + 2;
+    if (live >= 100000) { text(right, 16, "K", 1, true); right += text_w("K", 1) + 1; }
+    right += 4;
     if (right < 40) right = 40;
     uint32_t then = s_session_at[(now / 1000 + 1) % 10];   // "+N new": unique this session now minus ten seconds ago
     uint32_t fresh = st->aps_session > then ? st->aps_session - then : 0;

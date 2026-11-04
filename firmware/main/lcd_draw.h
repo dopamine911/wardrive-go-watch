@@ -9,7 +9,7 @@
 
 #define LCD_W  240                      // the largest panel: strip buffers and hashes are sized for it
 #define LCD_H  320
-#define LCD_SH 16                       // rows per strip
+#define LCD_SH 8                        // rows per strip (8: half the DMA strip buffer, 3.8 KB back on a 240-wide panel)
 #define LCD_STRIPS (LCD_H / LCD_SH)
 #define LCD_ACT_N 42                    // 14 × 2.4 GHz, then 28 × 5 GHz
 
@@ -19,6 +19,7 @@ typedef struct {
     lcd_status_t st;
     uint32_t now, t0;                   // ms
     uint32_t live, session, fresh;      // APs in range now, unique this session, new in the last 10 s
+    uint32_t run;                       // unique this run (sent to the phone, or saved to the card)
     int cur;                            // activity index of the channel being scanned (-1 = none)
     uint8_t act[LCD_ACT_N];             // channel activity, 0-250
     bool alerting, alert_on;            // banner showing, and its blink phase

@@ -38,9 +38,7 @@ static const char *TAG = "WardriveESP";
 #define SH LCD_SH
 #define FRAME_MS     200
 #define ALERT_BLINK_MS 250
-#define IDLE_DIM_MS  30000  // nobody linked this long: dim the backlight
-#define BL_ON   255
-#define BL_DIM  40
+#define BL_ON   255   // always full: an offline board is still working, and the screen is how you tell
 
 typedef struct { uint8_t c, n; uint8_t p[16]; uint16_t ms; } init_t;
 
@@ -330,6 +328,7 @@ static void gather(lcd_frame_t *f, uint32_t now) {
     f->t0 = s_t0;
     f->live = f->st.aps_live;
     f->session = f->st.aps_session;
+    f->run = f->st.aps_run;
     uint32_t then = s_session_at[(now / 1000 + 1) % 10];   // the oldest of the ten samples
     f->fresh = f->session > then ? f->session - then : 0;
     f->cur = lcd_act_index(f->st.channel);
@@ -352,7 +351,7 @@ static void lcd_task(void *arg) {
     (void)arg;
     bool dark = false;
     int bl = -1;
-    uint32_t last_decay = now_ms(), last_linked = now_ms();
+    uint32_t last_decay = now_ms();
     lcd_frame_t f;
     for (;;) {
         uint32_t now = now_ms();
@@ -367,7 +366,6 @@ static void lcd_task(void *arg) {
         if (dark) { vTaskDelay(pdMS_TO_TICKS(FRAME_MS)); continue; }
 
         gather(&f, now);
-        if (f.st.ble || f.st.usb) last_linked = now;
         if (now - last_decay >= 1000) {   // activity fades; a new second's slot starts at zero
             last_decay = now;
             for (int i = 0; i < LCD_ACT_N; i++) s_act[i] = (uint8_t)(s_act[i] * 3 / 4);
@@ -375,9 +373,7 @@ static void lcd_task(void *arg) {
         }
         bool alerting = f.alerting;
         render(&f, true);
-
-        int want = alerting || f.st.ota || now - last_linked <= IDLE_DIM_MS ? BL_ON : BL_DIM;
-        if (want != bl) { backlight(want); bl = want; }
+        if (bl != BL_ON) { backlight(BL_ON); bl = BL_ON; }
         vTaskDelay(pdMS_TO_TICKS(alerting ? ALERT_BLINK_MS / 2 : FRAME_MS));
     }
 }

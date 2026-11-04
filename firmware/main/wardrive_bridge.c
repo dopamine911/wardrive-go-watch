@@ -79,7 +79,7 @@
 
 static const char *TAG = "WardriveESP";
 
-#define FW_VERSION     "1.7.5"
+#define FW_VERSION     "1.7.6"
 // Shown by `info` and the boot log only. Never part of FW_VERSION: the apps compare versions number by number, so
 // "1.6.6-dev" would read as 1.6.0 and get offered the published firmware as an "update".
 #define FW_TAG         ""
@@ -240,6 +240,7 @@ static struct ble_npl_callout s_link_switch;   // USB session opened/closed: han
 static struct ble_npl_callout s_cmd_drain;     // runs commands written over BLE after their write response (cmd_drain)
 static bool s_link_ready = false;              // the callouts exist (on_ble_sync)
 static TaskHandle_t s_host_task = NULL;        // the NimBLE host task (set in on_ble_sync)
+static TaskHandle_t s_health_task = NULL;      // health ticks, and the answers to Bluetooth `sd` commands
 static volatile uint32_t s_tx_dropped = 0;     // BLE output frames dropped for lack of buffers (WD:HEALTH txdrop)
 static uint16_t s_conn_handle   = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t s_tx_val_handle = 0;
@@ -316,6 +317,8 @@ static volatile uint32_t s_bt_dropped   = 0;
 // so a board without a GPS wired up never claims the capability. It's read by WD:CAPS whether or not GPS is
 // compiled in (always 0 then), so it lives outside the build guard; the fix fields only exist when GPS is on.
 static volatile bool s_gps_present = false;
+/// A GPS module is talking (GGA/RMC sentences arrive, fix or not): the board can do offline runs once it has a fix.
+static volatile bool s_gps_talking = false;
 static TaskHandle_t s_gps_task = NULL;
 
 static int  on_gap_event(struct ble_gap_event *event, void *arg);
@@ -412,19 +415,40 @@ static char    s_line[384];   // WD:CAPS with every board key and 42 channels ru
 // 2026-10-26, 16 boards on one iPhone: each link drained slowly, a board's output took every buffer, the answer to the
 // phone's request couldn't be built, and the phone dropped the link exactly 30 s later (its GATT timeout).
 #define TX_RESERVE 4
+// Buffers the stream (scan, capture, Bluetooth, GPS lines) leaves for answers to the phone's commands on top of that:
+// caps and the rest from the host task, `sd read` from the health task. Field 2026-11-03: a board linked while sweeping
+// all 42 channels filled every buffer, its caps answer was dropped, so it never got a channel plan and kept flooding,
+// and every `sd read` reply was lost with it. The stream repeats what it hears; an answer is asked for once.
+#define REPLY_ROOM 6
 
-/// Room for one more output frame while keeping TX_RESERVE free. Senders other than the BLE host task wait up to 100 ms
-/// for the link to drain (backpressure instead of loss); the host task never waits.
-static bool tx_room(void) {
-    if (os_msys_num_free() >= TX_RESERVE) return true;
-    if (xTaskGetCurrentTaskHandle() == s_host_task) return false;
-    for (int i = 0; i < 20; i++) {
-        vTaskDelay(pdMS_TO_TICKS(5));
-        if (!s_bt_up || s_conn_handle == BLE_HS_CONN_HANDLE_NONE) return false;
-        if (os_msys_num_free() >= TX_RESERVE) return true;
-    }
-    return false;
+/// Buffers a sender must leave free: the stream leaves REPLY_ROOM more than answers do (never so many that a small
+/// pool starves the stream).
+static int tx_keep(void) {
+    TaskHandle_t me = xTaskGetCurrentTaskHandle();
+    if (me == s_host_task || me == s_health_task) return TX_RESERVE;
+    int keep = TX_RESERVE + REPLY_ROOM, most = (int)os_msys_count() - 2;
+    return keep < most ? keep : (most > TX_RESERVE ? most : TX_RESERVE);
 }
+
+/// Room for one more output frame while keeping tx_keep() free. Never waits: it runs under s_send_lock.
+static bool tx_room(void) { return os_msys_num_free() >= tx_keep(); }
+
+/// Backpressure instead of loss: waits up to `ms` for room for `frames` frames, BEFORE the caller takes s_send_lock.
+/// Buffers only come back when the BLE host task handles the link's completed packets, and that task needs s_send_lock
+/// to answer the phone; waiting while holding it stalled both (field 2026-11-03: a busy board's output fell to about
+/// 3 frames a second and every caps and sd read answer was lost). The host task never waits.
+static void tx_wait(int frames, int ms) {
+    if (xTaskGetCurrentTaskHandle() == s_host_task) return;
+    int need = tx_keep() + frames, most = (int)os_msys_count() - 1;
+    if (need > most) need = most;
+    for (int i = 0; i < ms / 5 && os_msys_num_free() < need; i++) {
+        if (!s_bt_up || s_conn_handle == BLE_HS_CONN_HANDLE_NONE) return;
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+}
+
+/// Frames a line of n bytes takes on the current link.
+static int frames_for(size_t n) { return (int)(n / max_payload_per_notify()) + 1; }
 
 static void send_frame(uint8_t type, const uint8_t *payload, size_t len) {
     if (!s_bt_up || s_conn_handle == BLE_HS_CONN_HANDLE_NONE || !s_notify_enabled || s_tx_val_handle == 0) return;
@@ -443,6 +467,7 @@ static void send_frame(uint8_t type, const uint8_t *payload, size_t len) {
 
 static void send_ack(void) {
     if (!s_bt_up || s_conn_handle == BLE_HS_CONN_HANDLE_NONE || !s_notify_enabled || s_tx_val_handle == 0) return;
+    tx_wait(1, 100);
     if (!tx_room()) { s_tx_dropped++; return; }
     uint8_t frame[FR_HEADER] = { FR_MAGIC_0, FR_MAGIC_1, FR_VERSION, FR_ACK };
     frame_put_u32(frame + 6, s_reply_id);
@@ -452,8 +477,15 @@ static void send_ack(void) {
 
 static void send_chunks_locked(const char *buf, size_t n) {
     size_t step = max_payload_per_notify();
+    bool host = xTaskGetCurrentTaskHandle() == s_host_task;
     for (size_t off = 0; off < n; off += step) {
         size_t chunk = (n - off < step) ? n - off : step;
+        // A line that has started goes out whole: one frame dropped from its middle reaches the phone as a damaged
+        // line (field 2026-11-03: every sd read chunk "damaged"). Its later frames wait here, briefly. The BLE host task,
+        // which frees the buffers, never waits, and only sends on link events now (commands run on the health task).
+        if (off && !host)
+            for (int i = 0; i < 60 && !tx_room() && s_bt_up && s_conn_handle != BLE_HS_CONN_HANDLE_NONE; i++)
+                vTaskDelay(pdMS_TO_TICKS(5));
         send_frame(FR_DATA, (const uint8_t *)buf + off, chunk);
     }
 }
@@ -470,6 +502,7 @@ static void emit_locked(uint8_t sinks, const char *buf, size_t n) {
 // For lines longer than s_line (the capture role's WD:HS).
 static void send_chunks(const char *buf, size_t n) {
     if (!s_send_lock) return;
+    tx_wait(frames_for(n), 100);
     xSemaphoreTake(s_send_lock, portMAX_DELAY);
     emit_locked(SINK_ALL, buf, n);
     xSemaphoreGive(s_send_lock);
@@ -477,6 +510,7 @@ static void send_chunks(const char *buf, size_t n) {
 
 static void send_vline(uint8_t sinks, const char *fmt, va_list ap) {
     if (!s_send_lock) return;
+    if (sinks & SINK_BLE) tx_wait(2, 100);   // most lines are one or two frames
     xSemaphoreTake(s_send_lock, portMAX_DELAY);
     int n = vsnprintf(s_line, sizeof(s_line) - 1, fmt, ap);
     if (n > 0) {
@@ -704,18 +738,24 @@ static void bt_task(void *arg) {
     vTaskDelete(NULL);
 }
 
-static void bt_start(void) {
-    if (s_bt_running || s_bt_task || s_ota_active || !host_linked()) return;
+/// True when the Bluetooth scan is running (or already was).
+static bool bt_start(void) {
+    if (s_bt_running || s_bt_task) return true;
+    if (s_ota_active || !host_linked()) return false;
     if (!s_bt_queue) s_bt_queue = xQueueCreate(BT_QUEUE_LEN, sizeof(bt_rec_t));
-    if (!s_bt_queue) { send_line("WD:ERR reason=no_memory"); return; }
+    if (!s_bt_queue) s_bt_queue = xQueueCreate(BT_QUEUE_LEN / 2, sizeof(bt_rec_t));   // a tight heap: half a queue
+    if (!s_bt_queue) { send_line("WD:ERR reason=no_memory"); return false; }
     s_bt_running = true;
     if (xTaskCreate(bt_task, "wd_bt", 6144, NULL, 5, &s_bt_task) != pdPASS) {
         s_bt_running = false;
         s_bt_task = NULL;
+        vQueueDelete(s_bt_queue);   // the Wi-Fi scan gets this memory meanwhile
+        s_bt_queue = NULL;
         send_line("WD:ERR reason=no_task");
-        return;
+        return false;
     }
     ESP_LOGI(TAG, "bluetooth scan started");
+    return true;
 }
 
 // ─── GPS role (PROTOCOL.md "GPS", firmware 1.4+) ──────────────────────────
@@ -768,6 +808,7 @@ static void handle_nmea(char *line) {
     bool gga = (strncmp(type, "GGA", 3) == 0);
     bool rmc = (strncmp(type, "RMC", 3) == 0);
     if (!gga && !rmc) return;
+    s_gps_talking = true;
     char *star = strchr(line, '*'); if (star) *star = '\0';   // drop the *CS checksum
     // Split on commas, preserving empty fields (strtok would collapse them — NMEA has many).
     char *f[20]; int nf = 0; f[nf++] = line;
@@ -795,6 +836,9 @@ static void handle_nmea(char *line) {
 }
 
 /// Where the board is for an offline run's row: the last fix, if it is at most 5 s old.
+/// A position from the last 5 s: what an offline run needs (WiGLE rows without one can't be placed or uploaded).
+static bool gps_fix_now(void) { uint32_t at = s_gps_fix_ms; return at && (uint32_t)(esp_timer_get_time() / 1000) - at < 5000; }
+
 static void gps_where(sdrun_ap_t *r) {
     uint32_t at = s_gps_fix_ms;
     r->fix = at && (uint32_t)(esp_timer_get_time() / 1000) - at < 5000;
@@ -909,6 +953,7 @@ static void gps_task(void *arg) {
 #endif  // CONFIG_WARDRIVEESP_GPS_ENABLE
 #if !CONFIG_WARDRIVEESP_GPS_ENABLE
 static void gps_where(sdrun_ap_t *r) { r->fix = false; }
+static bool gps_fix_now(void) { return false; }
 #endif
 
 static void scan_one_channel(uint8_t ch) {
@@ -979,16 +1024,19 @@ static void send_conn_line(int status) {
                  (unsigned)d.conn_latency, (unsigned)d.supervision_timeout * 10, status);
 }
 
+/// Closed offline runs the app can take (see "Offline runs").
+static void send_runs(uint8_t sinks) {
+    uint32_t n, bytes;
+    sdrun_pending(&n, &bytes);
+    send_line_to(sinks, "WD:RUNS n=%lu bytes=%lu", (unsigned long)n, (unsigned long)bytes);
+}
+
 static void send_header(uint8_t sinks) {
     send_caps_to(sinks);
     if (s_boot_line[0]) send_line_to(sinks, "%s", s_boot_line);
     if (s_crash_line[0]) send_line_to(sinks, "%s", s_crash_line);
     send_link_line(sinks);
-    if (sdrun_mounted()) {   // closed offline runs the app can take (see "Offline runs")
-        uint32_t n, bytes;
-        sdrun_pending(&n, &bytes);
-        send_line_to(sinks, "WD:RUNS n=%lu bytes=%lu", (unsigned long)n, (unsigned long)bytes);
-    }
+    if (sdrun_mounted()) send_runs(sinks);
 }
 
 static void scan_task(void *arg) {
@@ -1393,10 +1441,20 @@ static void cap_task(void *arg) {
     vTaskDelete(NULL);
 }
 
-static void cap_start(void) {
-    if (s_cap_running || s_cap_task || s_ota_active || !host_linked()) return;
-    if (!s_cap_queue) s_cap_queue = xQueueCreate(CAP_QUEUE_LEN, sizeof(cap_rec_t));
-    if (!s_cap_queue) { send_line("WD:ERR reason=no_memory"); return; }
+/// The role the phone asked for couldn't start (no memory at that moment): the board scans Wi-Fi meanwhile and the
+/// health tick tries this role again. ROLE_WIFI = nothing to retry.
+static volatile scan_role_t s_role_retry = ROLE_WIFI;
+
+/// True when capture is running (or already was).
+static bool cap_start(void) {
+    if (s_cap_running || s_cap_task) return true;
+    if (s_ota_active || !host_linked()) return false;
+    // A full queue first; a busy board's heap may only hold a half or quarter one (it just drops more frames in a burst).
+    for (int len = CAP_QUEUE_LEN; !s_cap_queue && len >= CAP_QUEUE_LEN / 4; len /= 2) {
+        s_cap_queue = xQueueCreate(len, sizeof(cap_rec_t));
+        if (s_cap_queue && len < CAP_QUEUE_LEN) ESP_LOGW(TAG, "capture queue %d frames (low memory)", len);
+    }
+    if (!s_cap_queue) { send_line("WD:ERR reason=no_memory"); return false; }
     s_cap_running = true;
     if (xTaskCreate(cap_task, "wd_cap", 10240, NULL, 5, &s_cap_task) != pdPASS) {
         // Heap too fragmented for the 10 KB stack beside a full queue (nothing feeds the queue until the task turns
@@ -1405,14 +1463,24 @@ static void cap_start(void) {
         s_cap_queue = xQueueCreate(CAP_QUEUE_LEN / 2, sizeof(cap_rec_t));
         if (s_cap_queue && xTaskCreate(cap_task, "wd_cap", 10240, NULL, 5, &s_cap_task) == pdPASS) {
             ESP_LOGW(TAG, "capture started with a half-size queue (low memory)");
-            return;
+            return true;
         }
+#if CONFIG_IDF_TARGET_ARCH_RISCV
+        // RISC-V boards use about 3 KB of it (the 10 KB is for the Xtensa S3): a board short of a 10 KB block still
+        // captures on 7 KB (field 2026-11-03: an AWOK Dual C5 with its screen had a 10 KB largest block at link).
+        if (s_cap_queue && xTaskCreate(cap_task, "wd_cap", 7168, NULL, 5, &s_cap_task) == pdPASS) {
+            ESP_LOGW(TAG, "capture started on a 7 KB stack (low memory)");
+            return true;
+        }
+#endif
         s_cap_running = false;
         s_cap_task = NULL;
+        if (s_cap_queue) { vQueueDelete(s_cap_queue); s_cap_queue = NULL; }   // the Wi-Fi scan gets this memory meanwhile
         send_line("WD:ERR reason=no_task");
-        return;
+        return false;
     }
     ESP_LOGI(TAG, "capture started");
+    return true;
 }
 
 // ─── Wi-Fi radar: CSI (PROTOCOL.md "Wi-Fi radar (CSI)", experimental) ──────
@@ -2079,8 +2147,18 @@ static volatile bool s_rebooting = false;
 static void stream_start(void) {
     if (s_rebooting) return;
     switch (s_role) {
-    case ROLE_BT:  bt_start();  break;
-    case ROLE_CAP: cap_start(); break;
+    case ROLE_BT:
+    case ROLE_CAP:
+        // A role that can't start (memory is lowest right as a phone links and copies runs) must never leave the board
+        // idle: field 2026-11-03, an AWOK Dual C5, a Mini v3 and Koko V8s sat at 0 in range or "paused". Scan Wi-Fi,
+        // try the role again later.
+        if (s_role == ROLE_BT ? bt_start() : cap_start()) { s_role_retry = ROLE_WIFI; break; }
+        s_role_retry = host_linked() ? s_role : ROLE_WIFI;
+        ESP_LOGW(TAG, "%s couldn't start: scanning Wi-Fi meanwhile", role_name(s_role));
+        s_role = ROLE_WIFI;
+        send_line("WD:MODE mode=wifi");
+        wifi_start();
+        break;
     case ROLE_CSI: csi_start(); break;
     default:       wifi_start(); break;
     }
@@ -2109,6 +2187,7 @@ static const char *role_name(scan_role_t role) {
 
 static void set_role(scan_role_t role) {
     const char *name = role_name(role);
+    if (role != s_role_retry) s_role_retry = ROLE_WIFI;   // asked for something else: stop retrying the old role
     if (role == s_role) {
         send_line("WD:MODE mode=%s", name);
         if (!s_streaming && !s_bt_running && !s_cap_running && !s_csi_running &&
@@ -3000,7 +3079,8 @@ static bool stored_board_is(const char *id) {
 //                   other chip, never on its C5)
 //   Koko V8         ESP32-C5 with the same MAX17048 on 5/4, plus an ILI9341 screen that answers its ID read
 //   Mini v3         ESP32-C5 without a gauge, with an ST7735 screen that answers its ID read
-//   Ghost Board     no fingerprint yet
+//   Ghost Board     ESP32-C6 whose microSD chip select (GPIO 23) reads pulled up by the slot, or told so with
+//                   `board ghostboard` (field 2026-11-03: it read as a generic C6, so its card was never mounted)
 #if CONFIG_IDF_TARGET_ESP32C5
 #define POLT_SDA 0   // the Poltergeist's SSD1306 bus
 #define POLT_SCL 1
@@ -3013,7 +3093,25 @@ static uint32_t flash_physical_mb(void) {
 }
 #endif
 
+#if CONFIG_IDF_TARGET_ESP32C6
+#define GHOST_SD_CS 23
+/// The Ghost Board's microSD chip select reads high against the internal pull-down: the slot's own pull-up.
+static bool ghost_cs_pulled_up(void) {
+    gpio_config_t io = { .pin_bit_mask = 1ULL << GHOST_SD_CS, .mode = GPIO_MODE_INPUT, .pull_down_en = GPIO_PULLDOWN_ENABLE };
+    gpio_config(&io);
+    esp_rom_delay_us(200);
+    int high = 0;
+    for (int i = 0; i < 5; i++) { high += gpio_get_level(GHOST_SD_CS); esp_rom_delay_us(50); }
+    gpio_reset_pin(GHOST_SD_CS);
+    ESP_LOGI(TAG, "Ghost Board probe: SD CS %d high %d of 5", GHOST_SD_CS, high);
+    return high >= 4;
+}
+#endif
+
 static board_t board_detect(void) {
+#if CONFIG_IDF_TARGET_ESP32C6
+    if (stored_board_is("ghostboard") || ghost_cs_pulled_up()) return BOARD_GHOSTBOARD;
+#endif
 #if CONFIG_IDF_TARGET_ESP32C5
     if (s_gauge_i2c) return s_has_lcd ? BOARD_KOKO_V8 : BOARD_CRUMB;
     if (s_has_mini) return BOARD_MINI_V3;
@@ -3144,8 +3242,14 @@ static void lcd_fill(lcd_status_t *st) {
     st->batt_pct = s_has_batt ? s_batt_pct : -1;
     st->aps_live = apc_live((uint32_t)(esp_timer_get_time() / 1000));
     st->aps_session = apc_session();
+    static int linked = -1;   // a run is one stretch linked to a host, or one stretch without
+    if ((int)host_linked() != linked) { linked = host_linked(); apc_run_reset(); }
+    st->aps_run = apc_run();
     st->sd_log = sdrun_active() && !host_linked();
+    st->sd_wait_gps = s_gps_talking && sdrun_mounted() && !host_linked() && !sdrun_active();   // no GPS at all: NOT SAVING
     st->sd_rows = sdrun_rows();
+    uint32_t wait_bytes;
+    sdrun_pending(&st->sd_waiting, &wait_bytes);
     sdx_fill(st);
     OTA_FILL(st);
 }
@@ -3224,11 +3328,15 @@ static void cmd_screen(void) {
 /// at the next boot, and only when the hardware gate passes). `board auto`: forget it.
 static void cmd_board(const char *arg) {
     if (!*arg) {
-        send_line("board %s%s", BOARDS[s_board].name, stored_board_is("marauder_mini_v3") ? "  ·  stored: marauder_mini_v3" : "");
+        send_line("board %s%s%s", BOARDS[s_board].name, stored_board_is("marauder_mini_v3") ? "  ·  stored: marauder_mini_v3" : "",
+                  stored_board_is("ghostboard") ? "  ·  stored: ghostboard" : "");
         return;
     }
     bool clear = !strcmp(arg, "auto");
-    if (!clear && strcmp(arg, "marauder_mini_v3")) { send_line("board marauder_mini_v3 | board auto"); return; }
+    if (!clear && strcmp(arg, "marauder_mini_v3") && strcmp(arg, "ghostboard")) {
+        send_line("board marauder_mini_v3 | board ghostboard | board auto");
+        return;
+    }
     nvs_handle_t h;
     if (nvs_open("iosesp", NVS_READWRITE, &h) != ESP_OK) { send_line("board: storage unavailable"); return; }
     if (clear) nvs_erase_key(h, "boardid");
@@ -3244,7 +3352,7 @@ static void cmd_help(void) {
     send_line("  status        scanning, sweeps, channels");
     send_line("  link          what it's connected to (phone address, signal, timing)");
     send_line("  drop          disconnect the phone so another one can link");
-    send_line("  sd [status|mount|test|list|read <file> <off> <len>|del <file>]  the microSD card (offline runs)");
+    send_line("  sd [status|mount|test|list|read <file> <off> <len>|del <file>|format yes]  the microSD card (offline runs)");
     send_line("  ch            show channels  ·  ch 1,6,11  ·  ch all");
     send_line("  start | stop  resume or pause scanning");
     send_line("  bt on|off     scan Bluetooth instead of Wi-Fi");
@@ -3713,12 +3821,13 @@ static void sd_note_ap(const wifi_ap_record_t *ap, size_t ssid_len) {
     memcpy(r.ssid, ap->ssid, ssid_len);
     r.ssid[ssid_len] = '\0';
     gps_where(&r);
-    sdrun_ap(&r);
+    if (r.fix) sdrun_ap(&r);   // owner 2026-11-03: offline runs are GPS only; a row with no position can't be uploaded
 }
 
 /// The last host let go: with a card in, a new offline run starts and the Wi-Fi scan carries on into it.
 static void offline_begin(void) {
-    if (s_rebooting || s_ota_active || !sdrun_start()) return;
+    // No GPS fix: no run (the health tick starts one when a fix comes, and the screen says NO GPS FIX).
+    if (s_rebooting || s_ota_active || !gps_fix_now() || !sdrun_start()) return;
     ESP_LOGI(TAG, "no host linked: offline run to the microSD card");
     if (s_scan_task || s_bt_task || s_cap_task || s_csi_task) s_switch_pending = true;   // the ending task restarts it
     else stream_start();
@@ -3729,24 +3838,26 @@ static void offline_end(void) {
     if (!sdrun_active()) return;
     sdrun_stop();
     ESP_LOGI(TAG, "host linked: offline run %s closing (%lu rows)", sdrun_file(), (unsigned long)sdrun_rows());
+    // The run's sweep stops too, and the host gets a fresh start (header, then its own channel plan) like any link.
+    // Handed the running sweep instead ("picked up mid-stream" in the app), boards linked mid-run often never got a
+    // caps answer out, so no plan came back and the full sweep kept the link starved (field 2026-11-03, 1.7.5 too).
+    s_switch_pending = false;
+    stream_stop();
 }
 
 // `sd` replies: to a session as protocol lines, or straight onto a port that has no session (the bench console, where
-// the logs are). Called under s_cmd_lock, so the buffer is shared; taken for one command and given back after it.
+// the logs are). Called under s_sd_lock, so the buffer is shared; taken for one command and given back after it.
 #define SD_CHUNK 768
 static char *s_sd_line;   // a reply line: up to SD_CHUNK bytes as base64, plus the fields
 #define SD_LINE  (SD_CHUNK * 4 / 3 + 160)
 
-static void sd_reply(uint8_t sink, bool session, const char *fmt, ...) {
-    if (!s_sd_line && !(s_sd_line = malloc(SD_LINE))) return;
-    va_list ap;
-    va_start(ap, fmt);
-    int n = vsnprintf(s_sd_line, SD_LINE - 1, fmt, ap);
-    va_end(ap);
+/// Sends the first n bytes of s_sd_line as one line.
+static void sd_send(uint8_t sink, bool session, int n) {
     if (n <= 0) return;
     if (n > SD_LINE - 2) n = SD_LINE - 2;
     s_sd_line[n++] = '\n';
     if (session) {
+        if (sink & SINK_BLE) tx_wait(frames_for((size_t)n), 2000);   // one frame dropped loses the whole reply
         xSemaphoreTake(s_send_lock, portMAX_DELAY);
         emit_locked(sink, s_sd_line, (size_t)n);
         xSemaphoreGive(s_send_lock);
@@ -3758,6 +3869,15 @@ static void sd_reply(uint8_t sink, bool session, const char *fmt, ...) {
 #if USB_JTAG_LINK
     if (sink == SINK_USB && s_usj.up) usb_serial_jtag_write_bytes(s_sd_line, (size_t)n, pdMS_TO_TICKS(100));
 #endif
+}
+
+static void sd_reply(uint8_t sink, bool session, const char *fmt, ...) {
+    if (!s_sd_line && !(s_sd_line = malloc(SD_LINE))) return;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(s_sd_line, SD_LINE - 1, fmt, ap);
+    va_end(ap);
+    sd_send(sink, session, n);
 }
 
 static void b64(char *out, const uint8_t *in, size_t n) {
@@ -3783,10 +3903,14 @@ static void sd_list_one(const char *name, uint32_t size, void *ctx) {
 /// `sd [status]`, `sd mount`, `sd list`, `sd read <file> <offset> <len>` (base64, up to 768 bytes), `sd del <file>`.
 static void sd_command(const char *arg, uint8_t sink, bool session);
 
+static SemaphoreHandle_t s_sd_lock;
+
 static void cmd_sd(const char *arg, uint8_t sink, bool session) {
+    xSemaphoreTake(s_sd_lock, portMAX_DELAY);
     sd_command(arg, sink, session);
     free(s_sd_line);   // given back: offline the heap is tight, and `sd` commands come seldom
     s_sd_line = NULL;
+    xSemaphoreGive(s_sd_lock);
 }
 
 static void sd_command(const char *arg, uint8_t sink, bool session) {
@@ -3814,6 +3938,13 @@ static void sd_command(const char *arg, uint8_t sink, bool session) {
         sd_reply(sink, session, "WD:SD mount=%s", sdrun_mounted() ? "already" : sdrun_remount() ? "trying" : "no_slot");
         return;
     }
+    if (!strncmp(arg, "format", 6) && (arg[6] == '\0' || arg[6] == ' ')) {   // erases the card: only when told twice
+        if (strcmp(arg, "format yes")) { sd_reply(sink, session, "WD:SD format=ask  (sd format yes erases the card)"); return; }
+        bool was = sdrun_mounted();
+        bool ok = sdrun_format();
+        sd_reply(sink, session, "WD:SD format=%s", was ? (ok ? "done" : "busy") : ok ? "trying" : "no_slot");
+        return;
+    }
     if (!strcmp(arg, "list")) {
         sd_ctx_t c = { sink, session };
         int n = sdrun_list(sd_list_one, &c);
@@ -3829,21 +3960,28 @@ static void sd_command(const char *arg, uint8_t sink, bool session) {
             return;
         }
         if (len > SD_CHUNK) len = SD_CHUNK;
-        uint8_t *raw = malloc(SD_CHUNK);
-        char *enc = malloc(SD_CHUNK * 4 / 3 + 4);
+        // One buffer for the whole reply (no per-read allocations to fragment the heap while a phone copies): the
+        // bytes are read into its tail, the fields written at its start, and the base64 written forward from there.
+        // It never overtakes the bytes still to be read while the fields end before RAW_AT - SD_CHUNK / 3.
+        const int RAW_AT = SD_LINE - SD_CHUNK;
+        if (!s_sd_line && !(s_sd_line = malloc(SD_LINE))) return;
+        uint8_t *raw = (uint8_t *)s_sd_line + RAW_AT;
         uint32_t size = 0;
-        int n = raw && enc ? sdrun_read(name, (uint32_t)off, raw, len, &size) : -2;
-        if (n >= 0) {
-            sdx_read(name, (uint32_t)off, n, size);
-            b64(enc, raw, (size_t)n);
-            sd_reply(sink, session, "WD:SD data name=%s off=%lu len=%d size=%lu crc=%08lx b64=%s", name, off, n,
-                     (unsigned long)size, (unsigned long)esp_rom_crc32_le(0, raw, (uint32_t)n), enc);
-        } else {
-            sd_reply(sink, session, "WD:SD err reason=%s name=%s", n == -2 ? "no_memory" : sdrun_mounted() ? "no_file" :
-                     "not_mounted", name);
+        int n = sdrun_read(name, (uint32_t)off, raw, len, &size);
+        if (n < 0) {
+            sd_reply(sink, session, "WD:SD err reason=%s name=%s", sdrun_mounted() ? "no_file" : "not_mounted", name);
+            return;
         }
-        free(raw);
-        free(enc);
+        sdx_read(name, (uint32_t)off, n, size);
+        uint32_t crc = esp_rom_crc32_le(0, raw, (uint32_t)n);
+        int h = snprintf(s_sd_line, RAW_AT, "WD:SD data name=%s off=%lu len=%d size=%lu crc=%08lx b64=", name, off, n,
+                         (unsigned long)size, (unsigned long)crc);
+        if (h <= 0 || h + SD_CHUNK / 3 + 4 >= RAW_AT) {
+            sd_reply(sink, session, "WD:SD err reason=usage name=%s", name);
+            return;
+        }
+        b64(s_sd_line + h, raw, (size_t)n);
+        sd_send(sink, session, h + (n + 2) / 3 * 4);
         return;
     }
     if (!strncmp(arg, "del ", 4)) {
@@ -3854,7 +3992,7 @@ static void sd_command(const char *arg, uint8_t sink, bool session) {
         else sd_reply(sink, session, "WD:SD del name=%s ok=0 reason=%s", name, r == -2 ? "open_run" : "no_file");
         return;
     }
-    sd_reply(sink, session, "sd status | mount | test | list | read <file> <offset> <len> | del <file>");
+    sd_reply(sink, session, "sd status | mount | test | list | read <file> <offset> <len> | del <file> | format yes");
 }
 
 static usb_port_t *usb_port(uint8_t sink) { return sink == SINK_USB ? &s_usj : &s_uart; }
@@ -4311,18 +4449,38 @@ static void usb_link_start(void) {
 // Commands written over BLE run right AFTER their write response goes out, not inside the write callback. Run inside,
 // a command's ack and output lines were queued ahead of the response and could take the last buffers, so the response
 // was never sent and the phone dropped the link after its 30 s GATT timeout (field 2026-10-26: the board ran
-// `wdstream start` and streamed its reply, the link dropped 30 s after the write). Host task only, so no lock.
+// `wdstream start` and streamed its reply, the link dropped 30 s after the write). The write callback (host task) fills
+// the ring and the health task empties it (ble_cmds_for): one writer, one reader, so no lock.
 #define CMD_RING 6
 static uint8_t  s_cmd_ring[CMD_RING][256];
 static uint16_t s_cmd_ring_len[CMD_RING];
-static uint8_t  s_cmd_head = 0, s_cmd_tail = 0;   // free-running; head - tail = commands waiting
+static volatile uint8_t s_cmd_head = 0, s_cmd_tail = 0;   // free-running; head - tail = commands waiting
 
 static void cmd_drain(struct ble_npl_event *ev) {
     (void)ev;
+    if (s_health_task) { xTaskNotifyGive(s_health_task); return; }   // its turn now (see ble_cmds_for)
     while (s_cmd_tail != s_cmd_head) {
         uint8_t i = s_cmd_tail % CMD_RING;
         handle_command(s_cmd_ring[i], s_cmd_ring_len[i]);
         s_cmd_tail++;
+    }
+}
+
+/// Commands from the phone run here, on the health task, not on the BLE host task: the host task can't wait for output
+/// buffers (they only come back when it handles the link's completed packets), so a busy link lost its answers (field
+/// 2026-11-03: a board answered none of 20 `caps` and never got a channel plan, nor any `sd read`). Here a reply waits
+/// its turn (tx_wait). Runs them until `ms` have passed: the health task's sleep between ticks.
+static void ble_cmds_for(uint32_t ms) {
+    int64_t end = esp_timer_get_time() + (int64_t)ms * 1000;
+    for (;;) {
+        while (s_cmd_tail != s_cmd_head) {
+            uint8_t i = s_cmd_tail % CMD_RING;
+            handle_command(s_cmd_ring[i], s_cmd_ring_len[i]);
+            s_cmd_tail++;
+        }
+        int64_t left = (end - esp_timer_get_time()) / 1000;
+        if (left <= 0) return;
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS((uint32_t)left));
     }
 }
 
@@ -4335,7 +4493,8 @@ static int on_command_write(uint16_t conn, uint16_t attr, struct ble_gatt_access
         if (ble_hs_mbuf_to_flat(ctxt->om, s_cmd_ring[i], sizeof(s_cmd_ring[i]), &got) != 0) return BLE_ATT_ERR_UNLIKELY;
         s_cmd_ring_len[i] = got;
         s_cmd_head++;
-        ble_npl_callout_reset(&s_cmd_drain, 0);
+        if (s_health_task) xTaskNotifyGive(s_health_task);
+        else ble_npl_callout_reset(&s_cmd_drain, 0);
         return 0;
     }
     // Queue full (or no host queue yet): run it now rather than lose it.
@@ -4797,9 +4956,11 @@ static long stack_free(TaskHandle_t t) { return t ? (long)uxTaskGetStackHighWate
 static void health_task(void *arg) {
     (void)arg;
     uint32_t last = 0, last_batt = 0;
-    bool boot_run_checked = false;
+    bool boot_run_checked = false, was_mounted = false, was_linked = false;
+    uint32_t linked_at = 0, last_closed = 0, role_tried = 0;
+    int runs_said = 0;
     for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        ble_cmds_for(1000);
         heap_check("health 1 s");
         s_heap_min_seen = esp_get_minimum_free_heap_size();
         uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
@@ -4807,6 +4968,44 @@ static void health_task(void *arg) {
 #if COPROC
         coproc_tick(now);
 #endif
+        // The card mounts ~5 s after boot, often after an app already linked and got a header without WD:RUNS: tell it now.
+        // The link header (WD:RUNS among it) goes out from the BLE host task, which drops lines on a busy link: say it
+        // again 2 s after each link from here, where a line can wait for room. The app ignores a repeat.
+        bool mounted = sdrun_mounted(), linked_now = host_linked();
+        if (linked_now && !was_linked) { linked_at = now | 1; runs_said = 0; }
+        // And whenever a run finishes closing while linked (the one the link itself closed is still open when the app
+        // first lists the card, field 2026-11-03).
+        uint32_t closed = 0, closed_bytes = 0;
+        if (mounted) sdrun_pending(&closed, &closed_bytes);
+        bool more = linked_now && closed > last_closed;
+        last_closed = closed;
+        // Said at 2 s and again at 8 s (an app that wasn't ready for the first ignored it).
+        bool due = linked_at && now - linked_at >= (runs_said ? 8000u : 2000u);
+        if (mounted && linked_now && ((!was_mounted) || more || due)) {
+            send_runs(SINK_ALL);
+            if (due && ++runs_said >= 2) linked_at = 0;
+        }
+        if (!linked_now) runs_said = 0;
+        was_mounted = mounted;
+        was_linked = linked_now;
+        // A role that couldn't start: try again every 15 s once a block big enough for its task is free.
+        scan_role_t want = s_role_retry;
+#if CONFIG_IDF_TARGET_ARCH_RISCV
+        const size_t need = want == ROLE_BT ? 6144 + 512 : 7168 + 512;
+#else
+        const size_t need = want == ROLE_BT ? 6144 + 512 : 10240 + 512;
+#endif
+        if (want != ROLE_WIFI && !linked_now) s_role_retry = want = ROLE_WIFI;
+        if (want != ROLE_WIFI && s_role == ROLE_WIFI && now - role_tried >= 15000 &&
+            heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) >= need) {
+            role_tried = now;
+            ESP_LOGI(TAG, "trying %s again", role_name(want));
+            xSemaphoreTake(s_cmd_lock, portMAX_DELAY);
+            set_role(want);
+            xSemaphoreGive(s_cmd_lock);
+        }
+        // Offline with a card but no run yet because there was no fix: start it once the GPS has one.
+        if (mounted && !linked_now && !sdrun_active() && boot_run_checked && gps_fix_now()) offline_begin();
         // Powered up with a card and no app: nothing ever linked, so no drop starts a run. Start one as soon as the
         // card mounts (5 s after boot); an app that links later closes it like any other.
         if (!boot_run_checked && (host_linked() || sdrun_mounted())) {
@@ -4868,6 +5067,7 @@ void app_main(void) {
     }
     s_send_lock = xSemaphoreCreateMutex();
     s_cmd_lock = xSemaphoreCreateMutex();
+    s_sd_lock = xSemaphoreCreateMutex();
     boot_diag_begin();
     board_init();   // before GPS: a board's own bus (the gauge on 4/5) is off limits to the GPS probe
     wifi_bring_up();
@@ -4890,7 +5090,7 @@ void app_main(void) {
     xTaskCreate(gps_task, "wd_gps", 6144, NULL, 4, &s_gps_task);
 #endif
     usb_link_start();
-    xTaskCreate(health_task, "wd_health", 6144, NULL, 3, NULL);
+    xTaskCreate(health_task, "wd_health", 6144, NULL, 3, &s_health_task);
     heap_check("boot done");
     ESP_LOGI(TAG, "WardriveESP %s%s ready", FW_VERSION, FW_TAG);
 }

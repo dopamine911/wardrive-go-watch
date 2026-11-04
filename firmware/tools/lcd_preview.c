@@ -59,6 +59,7 @@ int main(int argc, char **argv) {
     f.st.bt_devices = 41;
     f.live = 187;
     f.session = 1287;
+    f.run = 412;
     f.fresh = 12;
     save(dir, "2-dashboard", &f);
 
@@ -73,6 +74,17 @@ int main(int argc, char **argv) {
     f.st.captures = 0;
     f.st.batt_pct = 12;
     save(dir, "3-dashboard-idle", &f);
+    f.st.sd_log = true;   // no phone, saving to the card
+    f.st.sd_rows = 38412;
+    f.st.sd_waiting = 3;
+    f.run = 2871;
+    strcpy(f.st.mode, "WIFI");
+    f.live = 143;
+    f.session = 2871;
+    f.fresh = 9;
+    save(dir, "3b-dashboard-saving", &f);
+    f.st.sd_log = false;
+    f.st.sd_rows = 0;
 
     f.alerting = true;
     f.alert_on = true;

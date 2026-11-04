@@ -17,6 +17,7 @@
 #define WINS 3
 
 static uint8_t s_reg[S_M];
+static uint32_t s_run_base;      // the session count when this run began (no sketch of its own: 1 KB of RAM)
 static uint8_t l_reg[WINS][L_M];
 static uint32_t l_epoch[WINS];   // which 10 s window each slot holds (+1, so 0 = never used)
 
@@ -57,15 +58,19 @@ static uint32_t estimate_from(float sum, uint32_t zeros, uint32_t m) {
     return (uint32_t)(e + 0.5f);
 }
 
-uint32_t apc_session(void) {
+static uint32_t estimate(const uint8_t *reg, uint32_t m) {
     float sum = 0;
     uint32_t zeros = 0;
-    for (uint32_t i = 0; i < S_M; i++) {
-        sum += ldexpf(1.0f, -(int)s_reg[i]);
-        if (!s_reg[i]) zeros++;
+    for (uint32_t i = 0; i < m; i++) {
+        sum += ldexpf(1.0f, -(int)reg[i]);
+        if (!reg[i]) zeros++;
     }
-    return estimate_from(sum, zeros, S_M);
+    return estimate_from(sum, zeros, m);
 }
+
+uint32_t apc_session(void) { return estimate(s_reg, S_M); }
+uint32_t apc_run(void) { uint32_t n = apc_session(); return n > s_run_base ? n - s_run_base : 0; }
+void apc_run_reset(void) { s_run_base = apc_session(); }
 
 // The current window and the two before it, merged register by register on the fly (no buffer, so the beacon and
 // the screen can both ask at once).
