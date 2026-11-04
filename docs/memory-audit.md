@@ -20,7 +20,7 @@ this file: they belong in `memory-baseline.md`, measured with the instrumentatio
 |---|---|---|
 | Flash size | 4 MB (chip has 32 MB) | Section 8 |
 | PSRAM | not enabled | Every heap allocation is internal SRAM |
-| Optimization | `-Og` (`COMPILER_OPTIMIZATION_DEBUG`, upstream's choice for all chips) | Larger, slower code than `-O2`; relevant to rendering (section 6) |
+| Optimization | `-Og` (`COMPILER_OPTIMIZATION_DEBUG`, upstream's choice for all chips); `lcd_draw.c` at `-O2` in S3 builds since `a2c0fc3` | `-Og` code is larger and slower; painting turned out CPU-bound (`memory-soak-results.md` section 4) |
 | Stack overflow check | canary only (`FREERTOS_CHECK_STACKOVERFLOW_CANARY`) | Catches an overrun only at a context switch, after the damage |
 | Task watchdog | 5 s, idle tasks of both cores, **no panic** (`ESP_TASK_WDT_PANIC` unset) | A starved core logs a warning and carries on: watchdog events must be counted, a reset count won't show them |
 | Core dump | none | Resets are diagnosed from upstream's own breadcrumbs (`s_crash` in `.rtc_noinit`, `WD:BOOT reset=`, `WD:CRASH`) |
@@ -75,7 +75,7 @@ Stacks are bytes (ESP-IDF FreeRTOS). No task here is pinned unless noted; `xTask
 | `wd_usb` | 8,192 | 4 | any | always | `usb_link_start` |
 | `wd_health` | 6,144 | 3 | any | always; also runs BLE commands since 1.7.6 | `app_main` |
 | `wd_btpwr` | 4,096 | 4 | any | always | `app_main` |
-| `wd_gps` | 6,144 | 4 | any | **deletes itself at boot on the watch** (GPIO 4 is a watch pin) [INFER from code; boot log to confirm] | `gps_task` |
+| `wd_gps` | 6,144 | 4 | any | **deletes itself at boot on the watch** (GPIO 4 is a watch pin): HW-LOG `GPS: GPIO 4 belongs to this board's own hardware, GPS off` | `gps_task` |
 | `wd_lcd` | 4,096 | 1 | any | always (screen) | `lcd_start` |
 | `wd_scan` | 10,240 | 5 | any | Wi-Fi mode while a host listens | `wifi_start` |
 | `wd_bt` | 6,144 | 5 | any | Bluetooth mode | `bt_start` |
@@ -116,8 +116,8 @@ source read]
 
 ## 5. Display and fonts
 
-- Fonts: flash `.rodata` (`lcd_fonts.h`, `lcd_fonts_watch.h`, ≈114 KB for the watch set). Read through the flash
-  cache on every glyph: a candidate for cache misses during painting (section 6) [INFER].
+- Fonts: flash `.rodata` (`lcd_fonts.h`, `lcd_fonts_watch.h`, ≈114 KB for the watch set). First suspected of flash-cache
+  misses while painting; measurement ruled that out: glyphs are ≈11 % of the painting work (`memory-soak-results.md`).
 - Strip hashes: `s_hash`, 63 × 4 B.
 - Frame state `s_frame` 1,976 B static; the 32-entry list copy is made under a spinlock on the screen task.
 - Stack measurement caveat: the `lcd:` line reports `uxTaskGetStackHighWaterMark` from inside the `ESP_LOGI` that prints
@@ -130,8 +130,8 @@ source read]
   stream keeps `REPLY_ROOM` (6) more, and non-host tasks wait up to 100 ms (`tx_wait`) before dropping
   (`s_tx_dropped`, `txdrop=`).
 - Commands from the phone: a 6-slot ring, run on `wd_health`.
-- The watch's MODE/BOOT run commands from `wd_lcd` through `run_command` (`s_cmd_lock`), so a busy link can hold the
-  screen task for up to ~100 ms per output line [INFER from `tx_wait`].
+- The watch's MODE/BOOT presses used to run their commands on `wd_lcd`, so a busy link could hold the screen task for up
+  to ~100 ms per output line. Since `ea697af` they run on `wd_health`, beside the phone's commands.
 
 ## 7. Internal SRAM versus PSRAM
 

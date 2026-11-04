@@ -59,6 +59,7 @@ live dashboard on its own 410×502 AMOLED screen, and between sessions it's an o
 | [Build and flash](docs/waveshare-build-flash.md) | Developer detail: toolchain, serial log, host tests, screen previews, fonts |
 | [Verification record](docs/waveshare-verification.md) | What was tested on real hardware, with evidence, and what's still open |
 | [Port analysis](docs/waveshare-port-analysis.md) | How WardriveESP is built and the design decisions behind the port |
+| [Memory and stability](docs/memory-audit.md) | Memory map and allocation audit, with the [measured baseline](docs/memory-baseline.md) and [stress results](docs/memory-soak-results.md) |
 | [Protocol](firmware/PROTOCOL.md) | Upstream's BLE and USB protocol: commands, output lines, OTA |
 | [Upstream README](firmware/README.md) | WardriveESP's own README (all supported chips and boards) |
 

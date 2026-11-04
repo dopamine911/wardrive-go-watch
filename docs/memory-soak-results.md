@@ -111,3 +111,4 @@ throughout.
 | 5 | Reading a deleted role task's stack mark | the diagnostics, like upstream's `WD:HEALTH`, read a task handle that its task clears just before deleting itself; a read in that window reads freed memory [INFER: harmless in practice, not observed]; diagnostics images only |
 | 6 | PSRAM | off by decision (`memory-audit.md` section 12) |
 | 7 | Partition table | unchanged by decision (`memory-audit.md` section 13) |
+| 8 | Power use | not measured; plan and options in [issue #2](https://github.com/dopamine911/wardrive-go-watch/issues/2) |

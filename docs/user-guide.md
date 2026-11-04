@@ -72,7 +72,7 @@ Later reflashes don't need the erase. They also keep your clock, brightness and 
 
 ### 2.3 First boot
 
-A splash screen shows, then the dashboard. To watch the boot log without resetting the watch:
+A splash screen shows, then the clock face (page 1). To watch the boot log without resetting the watch:
 
 ```sh
 idf.py -B build-esp32s3 -D SDKCONFIG=build-esp32s3/sdkconfig -p /dev/ttyACM0 monitor --no-reset
@@ -339,7 +339,7 @@ The battery percent and cell appear on every page. The level is read from the AX
 state every 2 s:
 
 - **Bolt, green percent:** charging.
-- **Dim bolt:** on USB power, not charging (battery full). This state is drawn but hasn't been seen on hardware yet.
+- **Dim bolt:** on USB power, not charging (battery full).
 - **No bolt:** on battery.
 - **Cell color:** green above 40%, amber from 16 to 40%, red at 15% and below.
 
@@ -421,6 +421,8 @@ a session (`wdusb hello` … `wdusb bye`, opened without resetting the port, see
 - **Tested setup:** one watch and one Android phone. iPhone and several boards linked at once are untested.
 - **Unknown:** whether the clock keeps time after the battery runs completely flat with USB unplugged.
 - **Screen draw rate:** the dashboard redraws about once a second. Alert banners blink a little slower than designed.
+- **Battery life hasn't been measured.** How long a charge lasts in each mode is still open
+  ([issue #2](https://github.com/dopamine911/wardrive-go-watch/issues/2)).
 
 The full evidence and the list of open issues are in the [verification record](waveshare-verification.md).
 

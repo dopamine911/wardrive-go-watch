@@ -58,8 +58,8 @@ Nothing here comes from a simulator. Host tests cover only the hardware-independ
 | O3 | Dashboard is the 240×320 layout, centred | **closed** (Phase 4) | Native 410×502 pages, #21–#29 |
 | O4 | Screen brightness and timeout controls, on-watch scan start/stop | **closed** (Phase 4) | #25–#27 |
 | O7 | Screen sleep doesn't wake for an incoming firmware update | known | While dark the screen task doesn't gather state, so the OTA progress screen first shows on the next touch or alert. The update itself is unaffected |
-| O8 | Battery charge state | closed (screen only, #52–54) | Shown on the watch from the AXP2101's status registers. Still not sent to the app: no existing `WD:` key carries it (D3). The "on USB, not charging" state (full) is drawn but not yet seen on hardware |
-| O5 | Sustained soak (≥30 min concurrent scan and render) | not run | acceptance check 6 in the analysis |
+| O8 | Battery charge state | closed (screen only, #52–54) | Shown on the watch from the AXP2101's status registers. Still not sent to the app: no existing `WD:` key carries it (D3). All three states seen on hardware: charging, on battery, and on USB while full (#59) |
+| O5 | Sustained soak (≥30 min concurrent scan and render) | partly run | Stress scenarios passed (#56: 67 min of mode switches, alerts, reconnects and touch); the four 30-minute soaks are not run yet (#60) |
 | O6 | esp32c5 can't be built with the local IDF | upstream/toolchain | #3; needs the IDF release upstream uses |
 | O9 | Drawing a watch frame is slow on the chip | improved (#57–58) | Measured, not guessed: painting is CPU-bound (`memory-soak-results.md` section 4); the earlier INFER of flash-cache misses on fonts was wrong (glyphs are ≈11 % of the work). Alert worst frame 461 → 211 ms, dashboard paint 186 → 156 ms (`-Og`) and lower at `-O2`. Still above upstream's 125 ms alert-blink step (148 ms) |
 | O10 | Long serial captures lose stretches of log | not reproduced | Captures of 10–26 min on 2026-11-03 delivered every `MD` line (sequence numbers contiguous; they go through the USB driver) and every expected log line (e.g. 102 of 102 mode switches, 21/21/21 connect lines). Earlier losses stay unexplained |
@@ -67,6 +67,7 @@ Nothing here comes from a simulator. Host tests cover only the hardware-independ
 | O12 | Screen task stack headroom | closed (#55) | Measured worst case was a MODE/BOOT press running the role switch on `wd_lcd` (1,060 of 4,096 left); moved to `wd_health` (`ea697af`). Lowest since, across swipes, settings holds, alerts and presses with the log line on: 1,604 |
 | O13 | Wardrive Go doesn't send the time | upstream/app behaviour | HW-LOG: 40 s after the app linked, its commands were `wdstream`, `iam` and nothing else (no `time`). The chip starts blank, so the clock face reads NO TIME YET until the clock is set once over USB (docs/waveshare-build-flash.md "Set the clock"). After that the chip keeps it across resets. Not tested, and unknown: whether it keeps time when the battery runs flat and USB is out (which rail powers it wasn't read from the schematic) |
 | O14 | Timezone is compiled in | design limit | The chip and the board's clock hold UTC; the face shows it in `WATCH_TZ` (default America/Chicago, `CST6CDT,M3.2.0,M11.1.0`, from the host's tz database). Another zone, or travelling, needs the `#define` edited and a rebuild. DST switching is newlib's, not exercised yet (next change: 2027-03-14) |
+| O15 | Power use and battery life | not measured | The AXP2101 can't report current; no drain test has run. Plan and options in [issue #2](https://github.com/dopamine911/wardrive-go-watch/issues/2) |
 
 ## Phase 2–3: battery, phone alerts, touch, screen sleep (2026-11-03)
 
