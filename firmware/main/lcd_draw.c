@@ -108,10 +108,20 @@ static int rr_cov(int i, int j, int x, int y, int w, int h, int r) {
     int cx = i < x + r ? x + r : i >= x + w - r ? x + w - r : -1;
     int cy = j < y + r ? y + r : j >= y + h - r ? y + h - r : -1;
     if (cx < 0 || cy < 0) return 16;
-    int n = 0, rr = r * 8 * r * 8;
+    int rr = r * 8 * r * 8;
+    // In a corner the samples (offsets 1, 3, 5, 7 in eighths) never straddle the corner's centre on either axis, so the
+    // nearest sample is the smallest |dx| with the smallest |dy| and the farthest the largest with the largest: a pixel
+    // wholly inside or outside the arc is decided without the 16 tests (the same answer; most corner pixels are one of
+    // the two, and the 106-pixel corners of the watch's alert frame made this the frame's main cost).
+    int dx0 = i * 8 + 1 - cx * 8, dx1 = dx0 + 6, dy0 = j * 8 + 1 - cy * 8, dy1 = dy0 + 6;
+    int ax0 = dx0 < 0 ? -dx0 : dx0, ax1 = dx1 < 0 ? -dx1 : dx1, ay0 = dy0 < 0 ? -dy0 : dy0, ay1 = dy1 < 0 ? -dy1 : dy1;
+    int xn = ax0 < ax1 ? ax0 : ax1, xf = ax0 < ax1 ? ax1 : ax0, yn = ay0 < ay1 ? ay0 : ay1, yf = ay0 < ay1 ? ay1 : ay0;
+    if (xf * xf + yf * yf <= rr) return 16;
+    if (xn * xn + yn * yn > rr) return 0;
+    int n = 0;
     for (int sy = 0; sy < 4; sy++)
         for (int sx = 0; sx < 4; sx++) {
-            int dx = i * 8 + sx * 2 + 1 - cx * 8, dy = j * 8 + sy * 2 + 1 - cy * 8;
+            int dx = dx0 + sx * 2, dy = dy0 + sy * 2;
             if (dx * dx + dy * dy <= rr) n++;
         }
     return n;
