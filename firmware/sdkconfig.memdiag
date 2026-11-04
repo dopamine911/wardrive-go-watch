@@ -4,3 +4,6 @@
 # Never publish this image.
 CONFIG_WARDRIVEESP_MEMDIAG=y
 CONFIG_WARDRIVEESP_MEMDIAG_INTERVAL_S=60
+# Power investigation (issue #2): power management compiled in so `bench pm dfs` can let the CPU drop its clock when
+# idle. Unconfigured (the default until that command) it keeps the fixed default clock.
+CONFIG_PM_ENABLE=y

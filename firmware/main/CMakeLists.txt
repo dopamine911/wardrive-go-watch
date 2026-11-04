@@ -4,7 +4,7 @@ idf_component_register(
     INCLUDE_DIRS "."
     REQUIRES bt esp_wifi esp_event esp_netif nvs_flash esp_timer driver esp_driver_uart esp_driver_usb_serial_jtag esp_driver_tsens
              esp_driver_gpio esp_driver_i2c esp_driver_rmt esp_driver_spi esp_driver_ledc esp_lcd
-             app_update spi_flash esp_system heap fatfs sdmmc esp_driver_sdspi
+             app_update spi_flash esp_system heap fatfs sdmmc esp_driver_sdspi esp_pm
 )
 # The watch's 410x502 pages and their fonts (lcd_draw.c) only go into ESP32-S3 images: no other chip runs that screen.
 if(IDF_TARGET STREQUAL "esp32s3")

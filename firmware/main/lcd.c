@@ -206,6 +206,11 @@ static uint32_t s_poll_at, s_touch_at;      // last touch poll, last time a fing
 static volatile uint32_t s_boot_at;         // last BOOT press (0 = none): tells a BOOT wake from an alert's
 // Power diagnostics (lcd_diag_power): panel wakes by cause, and how long it has been lit, since boot.
 static volatile uint32_t s_wakes, s_wakes_touch, s_wakes_boot, s_lit_ms;
+// Bench power switches (lcd_bench_dark): put the panel in sleep (0x10) as well as display-off when dark, and how often
+// the finger and BOOT are polled while dark. Defaults are the shipping behaviour.
+static volatile bool s_bench_panel_sleep;
+static bool s_panel_asleep;
+static volatile uint16_t s_dark_poll_ms = DARK_POLL_MS;
 static void touch_tick(uint32_t now);
 
 // Channel activity from AP sightings (14 × 2.4 GHz, then 28 × 5 GHz). The counts themselves come from apcount via the
@@ -666,7 +671,13 @@ static void lcd_task(void *arg) {
         if (want_dark != dark) {
             dark = s_dark = want_dark;
             lcd_bus_lock();
-            cmd(dark ? 0x28 : 0x29, NULL, 0);
+            if (dark) {
+                cmd(0x28, NULL, 0);                                         // display off
+                if (s_bench_panel_sleep) { cmd(0x10, NULL, 0); s_panel_asleep = true; }   // bench: sleep in too
+            } else {
+                if (s_panel_asleep) { cmd(0x11, NULL, 0); vTaskDelay(pdMS_TO_TICKS(120)); s_panel_asleep = false; }
+                cmd(0x29, NULL, 0);                                         // display on
+            }
             lcd_bus_unlock();
             if (dark) { backlight(0); bl = 0; }
             else { memset(s_hash, 0, sizeof(s_hash)); last_render = 0; }   // redraw everything on the way back
@@ -686,7 +697,7 @@ static void lcd_task(void *arg) {
                 ESP_LOGI(TAG, "lcd: screen off (no touch for %u s)", s_sleep_s);
             }
         }
-        if (dark) { vTaskDelay(pdMS_TO_TICKS(s_touch ? DARK_POLL_MS : FRAME_MS)); continue; }   // the finger and BOOT still polled
+        if (dark) { vTaskDelay(pdMS_TO_TICKS(s_touch ? s_dark_poll_ms : FRAME_MS)); continue; }   // the finger and BOOT still polled
 
         bool dirty = s_redraw, holding = false;
         s_redraw = false;
@@ -782,6 +793,11 @@ void lcd_bench_touch(void) { s_touch_at = now_ms(); }
 void lcd_diag_power(lcd_power_diag_t *d) {
     d->wakes = s_wakes; d->wakes_touch = s_wakes_touch; d->wakes_boot = s_wakes_boot; d->lit_ms = s_lit_ms;
     d->bright_pct = s_bright_pct; d->sleep_s = s_sleep_s;
+    d->panel_sleep = s_bench_panel_sleep; d->dark_poll_ms = s_dark_poll_ms;
+}
+void lcd_bench_dark(bool panel_sleep, uint16_t poll_ms) {
+    s_bench_panel_sleep = panel_sleep;
+    s_dark_poll_ms = poll_ms < 10 ? 10 : poll_ms;
 }
 
 // ── microSD slot (the Koko V8 / AWOK Dual C5 layout: card on CS 10 of the panel's bus) ──

@@ -89,8 +89,12 @@ typedef struct {
     uint32_t wakes, wakes_touch, wakes_boot, lit_ms;   // wakes not by touch or BOOT were alerts
     uint8_t  bright_pct;
     uint16_t sleep_s;
+    bool     panel_sleep;     // bench switch: panel sleep-in while dark (shipping: display-off only)
+    uint16_t dark_poll_ms;    // touch/BOOT polling while dark
 } lcd_power_diag_t;
 void lcd_diag_power(lcd_power_diag_t *d);
+/// Bench power switches: panel sleep-in while dark, and the dark polling period (shipping: off, 50 ms).
+void lcd_bench_dark(bool panel_sleep, uint16_t poll_ms);
 /// "240x320" / "128x128" / "410x502" while a screen runs, else "".
 const char *lcd_size(void);
 /// A Wi-Fi AP sighting (Wi-Fi scan or capture): unique count, "+new" ticker, channel activity.

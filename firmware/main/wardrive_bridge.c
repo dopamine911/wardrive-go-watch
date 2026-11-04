@@ -68,6 +68,9 @@
 #if CONFIG_WARDRIVEESP_MEMDIAG
 #include "memdiag.h"
 #include "esp_task_wdt.h"
+#if CONFIG_PM_ENABLE
+#include "esp_pm.h"
+#endif
 #endif
 #if SOC_MODEM_CLOCK_SUPPORTED
 #include "esp_private/esp_modem_clock.h"
@@ -318,6 +321,7 @@ static volatile uint32_t s_bt_dropped   = 0;
 #if CONFIG_WARDRIVEESP_MEMDIAG
 static volatile uint32_t s_md_qdrop = 0;   // bench diagnostics: Bluetooth records dropped, summed over every window
 static void md_command(const char *s);     // `diag ...` / `bench ...` on a USB port without a session
+static uint16_t s_bench_adv_ms = 0;        // bench: the unlinked advertising interval in ms (0 = NimBLE's 30-60 ms)
 #endif
 
 // GPS role (PROTOCOL.md "GPS", firmware 1.4+): an optional UART NMEA receiver. The task runs continuously and
@@ -4965,6 +4969,12 @@ static void start_advertising(void) {
     if (ble_gap_adv_active()) (void)ble_gap_adv_stop();   // the linked-board beacon, if it was still up
     set_free_fields();
     struct ble_gap_adv_params params = { .conn_mode = BLE_GAP_CONN_MODE_UND, .disc_mode = BLE_GAP_DISC_MODE_GEN };
+#if CONFIG_WARDRIVEESP_MEMDIAG
+    if (s_bench_adv_ms) {   // bench: a fixed interval instead of NimBLE's default 30-60 ms (0.625 ms units)
+        params.itvl_min = (uint16_t)(s_bench_adv_ms * 1000u / 625u);
+        params.itvl_max = (uint16_t)(params.itvl_min + params.itvl_min / 10);
+    }
+#endif
     if (ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER, &params, on_gap_event, NULL) != 0) {
         ESP_LOGE(TAG, "advertising failed to start");
         return;
@@ -5267,6 +5277,7 @@ static void modem_reset_stale(void) {
 // software reset or panic) and out as an "MD ..." line on the USB port while no session holds it. Nothing here runs on
 // the scan or Bluetooth paths. Internal heap only: this image has no PSRAM.
 static RTC_NOINIT_ATTR memdiag_ring_t s_md_ring;
+static const char *s_bench_pm = "off";   // bench: the CPU power-management setting last applied (bench pm)
 static portMUX_TYPE s_md_lock = portMUX_INITIALIZER_UNLOCKED;   // the ring: wd_health writes, wd_usb dumps
 static memdiag_acc_t s_md_acc;
 static volatile uint32_t s_md_allocfail, s_md_allocfail_size, s_md_allocfail_caps;
@@ -5410,12 +5421,14 @@ static void md_command(const char *s) {
         lcd_power_diag_t pw;
         lcd_diag_power(&pw);
         n = (size_t)snprintf(line, sizeof(line), "MD now allocfail_last=%lu caps=0x%lx reset=%d ring=%s next_seq=%lu "
-                             "internal_total=%u largest_now=%u bright=%u screen_off_s=%u wakes_total=%lu lit_s_total=%lu",
+                             "internal_total=%u largest_now=%u bright=%u screen_off_s=%u wakes_total=%lu lit_s_total=%lu "
+                             "adv_ms=%u panel_sleep=%u dark_poll_ms=%u pm=%s",
                              (unsigned long)s_md_allocfail_size, (unsigned long)s_md_allocfail_caps,
                              (int)esp_reset_reason(), s_md_kept ? "kept" : "new", (unsigned long)s_md_ring.next_seq,
                              (unsigned)heap_caps_get_total_size(MALLOC_CAP_INTERNAL),
                              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL), (unsigned)pw.bright_pct,
-                             (unsigned)pw.sleep_s, (unsigned long)pw.wakes, (unsigned long)(pw.lit_ms / 1000));
+                             (unsigned)pw.sleep_s, (unsigned long)pw.wakes, (unsigned long)(pw.lit_ms / 1000),
+                             (unsigned)s_bench_adv_ms, (unsigned)pw.panel_sleep, (unsigned)pw.dark_poll_ms, s_bench_pm);
         md_out(line, n, sizeof(line), pdMS_TO_TICKS(100));
         return;
     }
@@ -5461,9 +5474,42 @@ static void md_command(const char *s) {
     } else if (!strcmp(s, "bench wake")) {
         lcd_bench_touch();
         reply = "MD bench wake";
+    } else if (!strncmp(s, "bench adv ", 10)) {   // ms between unlinked adverts; 0 = NimBLE's default (30-60 ms)
+        s_bench_adv_ms = (uint16_t)atoi(s + 10);
+        if (s_bench_adv_ms && s_bench_adv_ms < 20) s_bench_adv_ms = 20;
+        if (s_conn_handle == BLE_HS_CONN_HANDLE_NONE && !s_usb_sessions && ble_gap_adv_active()) start_advertising();
+        n = (size_t)snprintf(line, sizeof(line), "MD bench adv %u ms%s", (unsigned)s_bench_adv_ms,
+                             s_bench_adv_ms ? "" : " (NimBLE default 30-60)");
+        md_out(line, n, sizeof(line), pdMS_TO_TICKS(100));
+        return;
+    } else if (!strcmp(s, "bench panel sleep") || !strcmp(s, "bench panel off")) {
+        lcd_power_diag_t pw;
+        lcd_diag_power(&pw);
+        lcd_bench_dark(s[12] == 's', pw.dark_poll_ms);
+        reply = s[12] == 's' ? "MD panel: sleep-in when dark (takes effect at the next screen-off)"
+                             : "MD panel: display-off only when dark (shipping)";
+    } else if (!strncmp(s, "bench poll ", 11)) {
+        lcd_power_diag_t pw;
+        lcd_diag_power(&pw);
+        lcd_bench_dark(pw.panel_sleep, (uint16_t)atoi(s + 11));
+        reply = "MD dark poll set";
+    } else if (!strcmp(s, "bench pm off") || !strcmp(s, "bench pm dfs")) {
+#if CONFIG_PM_ENABLE
+        bool dfs = s[9] == 'd';
+        esp_pm_config_t pm = { .max_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
+                               .min_freq_mhz = dfs ? 40 : CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ, .light_sleep_enable = false };
+        esp_err_t e = esp_pm_configure(&pm);
+        if (e == ESP_OK) s_bench_pm = dfs ? "dfs" : "off";
+        n = (size_t)snprintf(line, sizeof(line), "MD bench pm %s: %s", dfs ? "dfs (40-160 MHz)" : "off (160 MHz)",
+                             esp_err_to_name(e));
+        md_out(line, n, sizeof(line), pdMS_TO_TICKS(100));
+        return;
+#else
+        reply = "MD bench pm: this image has no CONFIG_PM_ENABLE";
+#endif
     } else {
         reply = "MD usage: diag | diag dump | diag clear | bench mode | bench alert | bench drop | bench wake | "
-                "bench lcdlog 0|1";
+                "bench lcdlog 0|1 | bench adv <ms> | bench panel sleep|off | bench poll <ms> | bench pm off|dfs";
     }
     n = (size_t)snprintf(line, sizeof(line), "%s", reply);
     md_out(line, n, sizeof(line), pdMS_TO_TICKS(100));
