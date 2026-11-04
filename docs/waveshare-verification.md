@@ -58,7 +58,7 @@ Nothing here comes from a simulator. Host tests cover only the hardware-independ
 | O3 | Dashboard is the 240×320 layout, centred | **closed** (Phase 4) | Native 410×502 pages, #21–#29 |
 | O4 | Screen brightness and timeout controls, on-watch scan start/stop | **closed** (Phase 4) | #25–#27 |
 | O7 | Screen sleep doesn't wake for an incoming firmware update | known | While dark the screen task doesn't gather state, so the OTA progress screen first shows on the next touch or alert. The update itself is unaffected |
-| O8 | Battery charge state not shown | by design (D3) | The AXP2101 reports charging (`0x01` bits 7–5), but no existing `WD:` key or dashboard field carries it |
+| O8 | Battery charge state | closed (screen only, #52–54) | Shown on the watch from the AXP2101's status registers. Still not sent to the app: no existing `WD:` key carries it (D3). The "on USB, not charging" state (full) is drawn but not yet seen on hardware |
 | O5 | Sustained soak (≥30 min concurrent scan and render) | not run | acceptance check 6 in the analysis |
 | O6 | esp32c5 can't be built with the local IDF | upstream/toolchain | #3; needs the IDF release upstream uses |
 | O9 | Drawing a watch frame is slow on the chip | known, contained | HW-LOG: painting ~80–130 ms per dashboard frame (0.6 ms on a PC). Touch is followed between strips (#24), and the watch draws its data once a second (#29), so it costs ~10 % of one core. Alert frames run up to ~450 ms, so their blink is slower than the 250 ms design. Cause not pinned down (INFER: flash-cache misses on code and fonts) |
@@ -163,3 +163,15 @@ the dashboard tile reads SENT while linked, SEEN otherwise, upstream's wording.
 | 49 | Nothing of the watch leaks onto other chips | pass, with a known 48 bytes | BUILD: pristine 1.7.6 esp32c3 0x115080, esp32c6 0x1658f0; ours +0x70 on both. `nm` symbol diff (C3): only `BOARDS` (+16, the Waveshare entry in upstream's shared board table), `ext_build` (+16, the advert's screen flag names the watch) and `lcd_size` (+16, the 410x502 case), all from slice 1. On 1.7.5 the same additions fell inside alignment padding, so "C3 unchanged" (#21) was luck, not proof |
 | 50 | 1.7.6 on the watch | pass | HW-LOG: `WD:BOOT fw=1.7.6`, `board: Waveshare AMOLED 2.06`, `clock set from rtc`, `touch FT3x68: ready`, `WardriveESP 1.7.6 ready`; phone linked and streamed; BOOT → `bt on` → `bluetooth scan started`, → `cap on` → `capture started`; pages 0–3. HW-EYE: clock right, BOOT stepped the mode, SENT tile while linked; Wardrive Go shows 1.7.6 |
 | 51 | Frame cost with 8-row strips | pass | HW-LOG: `lcd: 68 frames in 60 s, avg 122 ms (paint 116, panel 11, touch 3, state 3), worst 576 ms, … stack left 1108`, capture running. One sample; not slower than 16-row strips (#37: avg 164 ms while capturing) |
+
+## Charging indicator (2026-11-03)
+
+Registers from XPowersLib `XPowersAXP2101.tpp` in the Waveshare repo at `30f3b23`: STATUS1 `0x00` bit 5 USB power
+good (`isVbusGood`); STATUS2 `0x01` bits 7:5 battery current, `01` charging (`isCharging`), bits 2:0 charger state
+(`getChargerStatus`). Read every 2 s on the health task (the level stays every 30 s); each change is logged.
+
+| # | Check | Result | Evidence |
+|---|---|---|---|
+| 52 | Charging is read | pass | HW-LOG at boot on USB: `watch: charging (power status 38 32)`, `battery AXP2101: 31%, 3929 mV, charging`. `38`: USB good, battery present; `32`: charging, constant-current phase |
+| 53 | Plug and unplug | pass | HW-EYE: bolt shown while charging, gone on unplug, back on replug (the serial log can't follow an unplug: USB is the port) |
+| 54 | Drawing | pass | AUTO/visual: `docs/previews/w17-clock-charging.png` (green bolt, green percent), `w18-dashboard-charging.png` (white bolt over the header's cell), `w19-dashboard-usb-full.png` and `w20-clock-usb-full.png` (dim bolt). BUILD: esp32s3 0x14e5d0; esp32c3/c6/c5 unchanged. Not seen on hardware: the full state (battery was at 31 %) |

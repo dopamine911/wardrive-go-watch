@@ -3037,10 +3037,13 @@ static void battery_read(void) {}
 #define AXP2101_ADDR         0x34
 #define AXP2101_REG_IC_TYPE  0x03
 #define AXP2101_IC_TYPE      0x4A
-// Battery registers (XPowersLib XPowersAXP2101.tpp: isBatteryConnect, enableBattVoltageMeasure, disableTSPinMeasure,
-// getBattVoltage, getBatteryPercent).
-#define AXP2101_REG_STATUS1  0x00   // bit 3: a battery is connected
+// Battery registers (XPowersLib XPowersAXP2101.tpp: isBatteryConnect, isVbusGood, isCharging, getChargerStatus,
+// enableBattVoltageMeasure, disableTSPinMeasure, getBattVoltage, getBatteryPercent).
+#define AXP2101_REG_STATUS1  0x00   // bit 3: a battery is connected; bit 5: USB power is good
 #define AXP2101_BAT_PRESENT  0x08
+#define AXP2101_VBUS_GOOD    0x20
+#define AXP2101_REG_STATUS2  0x01   // bits 7:5: battery current 01 charging, 10 discharging, 00 standby; 2:0 charger state
+#define AXP2101_CHARGING     0x01   // STATUS2 >> 5
 #define AXP2101_REG_ADC_CTRL 0x30   // bit 0: battery voltage ADC; bit 1: TS pin (NTC) measurement
 #define AXP2101_ADC_VBAT     0x01
 #define AXP2101_ADC_TS       0x02
@@ -3095,6 +3098,19 @@ static void battery_read(void) {
     if (pmic_read(AXP2101_REG_VBAT_H, &h) && pmic_read(AXP2101_REG_VBAT_L, &l)) s_batt_mv = ((h & 0x1F) << 8) | l;
 }
 
+static volatile uint8_t s_charge = LCD_CHARGE_NONE;
+static const char *const CHARGE_NAME[] = { "on battery", "charging", "on USB power, not charging" };
+
+/// USB power and charging, from the AXP2101 (health_task, every 2 s: a plug shows at once, unlike the 30 s level).
+static void charge_read(void) {
+    uint8_t s1 = 0, s2 = 0;
+    if (!s_pmic || !pmic_read(AXP2101_REG_STATUS1, &s1) || !pmic_read(AXP2101_REG_STATUS2, &s2)) return;
+    uint8_t c = !(s1 & AXP2101_VBUS_GOOD) ? LCD_CHARGE_NONE : (s2 >> 5) == AXP2101_CHARGING ? LCD_CHARGE_ON : LCD_CHARGE_PLUGGED;
+    if (c == s_charge) return;
+    s_charge = c;
+    ESP_LOGI(TAG, "watch: %s (power status %02x %02x)", CHARGE_NAME[c], s1, s2);
+}
+
 /// Battery voltage ADC on, TS pin measurement off: the watch has no NTC on TS, and Waveshare's own setup turns it off
 /// because it otherwise upsets charging (01_AXP2101 port_axp2101.cpp:112-114; XPowersLib begin() does the same).
 static void watch_battery_init(void) {
@@ -3104,7 +3120,9 @@ static void watch_battery_init(void) {
     if (i2c_master_transmit(s_pmic, w, sizeof(w), 50) != ESP_OK) { ESP_LOGW(TAG, "watch: power chip ADC setup failed"); return; }
     s_has_batt = true;
     battery_read();
-    ESP_LOGI(TAG, "battery AXP2101: %d%%, %d mV (ADC ctrl %02x -> %02x)", s_batt_pct, s_batt_mv, v, w[1]);
+    charge_read();
+    ESP_LOGI(TAG, "battery AXP2101: %d%%, %d mV, %s (ADC ctrl %02x -> %02x)", s_batt_pct, s_batt_mv, CHARGE_NAME[s_charge],
+             v, w[1]);
 }
 
 // ── FT3168 touch (Arduino_DriveBus Arduino_FT3x68: reset timing, registers; Waveshare BSP: reset GPIO 9) ──
@@ -3474,6 +3492,7 @@ static void lcd_fill(lcd_status_t *st) {
     nets = bt ? s_btlog : s_netlog;
     taskEXIT_CRITICAL(&s_netlog_lock);
     st->nets_n = (uint8_t)netlog_recent(&nets, st->nets, NETLOG_N);
+    st->charge = s_charge;
     st->wall_ok = s_clock_set;
     if (s_clock_set) {
         time_t now = time(NULL);
@@ -5227,6 +5246,10 @@ static void health_task(void *arg) {
         s_heap_min_seen = esp_get_minimum_free_heap_size();
         uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
         if (s_has_batt && now - last_batt >= 30000) { last_batt = now; battery_read(); }   // the I2C gauge only
+#if CONFIG_IDF_TARGET_ESP32S3
+        static uint32_t last_charge;
+        if (s_watch && now - last_charge >= 2000) { last_charge = now; charge_read(); }
+#endif
 #if COPROC
         coproc_tick(now);
 #endif

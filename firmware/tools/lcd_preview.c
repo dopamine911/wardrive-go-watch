@@ -96,6 +96,18 @@ static void watch_scenes(const char *dir, lcd_frame_t *f) {
     save_watch(dir, "w16-clock-no-time", f);
     st->scanning = true;
 
+    // On USB power: charging (green bolt, green percent), then full and resting (dim bolt)
+    st->wall_ok = true; st->wall_hour = 13; st->wall_min = 34; st->wall_wday = 2; st->wall_mday = 3; st->wall_mon = 11;
+    st->charge = LCD_CHARGE_ON; st->batt_pct = 64;
+    save_watch(dir, "w17-clock-charging", f);
+    f->page = LCD_PAGE_DASH;
+    save_watch(dir, "w18-dashboard-charging", f);
+    st->charge = LCD_CHARGE_PLUGGED; st->batt_pct = 100;
+    save_watch(dir, "w19-dashboard-usb-full", f);
+    f->page = LCD_PAGE_CLOCK;
+    save_watch(dir, "w20-clock-usb-full", f);
+    st->charge = LCD_CHARGE_NONE; st->batt_pct = 82;
+
     net(st, 1, "dragino-3296cc", -67, 11, "WPA2");
     net(st, 2, "RT-AC66U_B1_A8_2G", -78, 11, "WPA2");
     net(st, 3, "", -81, 6, "WPA2");

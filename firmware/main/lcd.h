@@ -9,6 +9,9 @@
 
 #include "netlog.h"
 
+/// The watch's power: no USB power, charging, or on USB power and not charging (full, or the charger is resting).
+enum { LCD_CHARGE_NONE = 0, LCD_CHARGE_ON, LCD_CHARGE_PLUGGED };
+
 /// What the dashboard shows, filled by wardrive_bridge.c a few times a second.
 typedef struct {
     uint8_t  channel;        // channel being scanned (0 = none)
@@ -42,6 +45,7 @@ typedef struct {
     bool     scanning;       // the scan for `mode` is running
     bool     can_scan;       // a host is listening (the phone subscribed, or a USB session), so a scan can start
     int      batt_mv;        // 0 = unknown
+    uint8_t  charge;         // LCD_CHARGE_*: USB power and whether the battery is taking it
     char     ble_name[24];   // the board's advertised name
     uint16_t mtu;            // the phone link's ATT MTU (0 = no phone)
     uint32_t bt_now;         // Bluetooth mode: devices so far in the current 10 s window (bt_devices: the last whole one)

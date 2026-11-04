@@ -1088,6 +1088,14 @@ static void w_glow(const lcd_font_t *f, int x, int base, const char *s, int sp, 
     for (size_t i = 0; i < sizeof(D) / sizeof(D[0]); i++) text_ex(f, x + D[i][0], base + D[i][1], s, sp, c, c, SOLID, a);
 }
 
+// A lightning bolt (charging) centered on cx, cy, h tall: top right down to the middle, across, down to bottom left.
+static void w_bolt(int cx, int cy, int h, int r, uint16_t c) {
+    int dx = h / 5, x0 = cx + dx, y0 = cy - h / 2, x1 = cx - dx, y1 = cy + 1, x2 = cx + dx, y2 = cy - 1, x3 = cx - dx;
+    seg(x0, y0, x1, y1, r, c, 16);
+    seg(x1, y1, x2, y2, r, c, 16);
+    seg(x2, y2, x3, cy + h / 2, r, c, 16);
+}
+
 static void w_header(const lcd_frame_t *f) {
     fill(0, 0, W, W_HEAD, C_BLACK);
     text_ex(&wfont_head, W_HEAD_X, 50, "WARDRIVE", 1, C_CYAN, C_MAG, HORIZ, 16);
@@ -1100,9 +1108,13 @@ static void w_header(const lcd_frame_t *f) {
         rrect(bx + 46, by + 7, 4, 10, 2, C_DIM, 16);
         int lw = 38 * pct / 100;
         if (lw > 0) rrect(bx + 4, by + 4, lw, 16, 3, c, 14);
+        if (f->st.charge != LCD_CHARGE_NONE) {   // on USB power: a bolt over the cell, white while charging
+            w_bolt(bx + 23, by + 12, 16, 3, C_BLACK);
+            w_bolt(bx + 23, by + 12, 16, 1, f->st.charge == LCD_CHARGE_ON ? C_WHITE : C_DIM);
+        }
         char b[8];
         snprintf(b, sizeof(b), "%d%%", pct);
-        text_r(&wfont_label, bx - 8, 46, b, c);
+        text_r(&wfont_label, bx - 8, 46, b, f->st.charge == LCD_CHARGE_ON ? C_GREEN : c);
     }
     hgrad(0, W_HEAD - 3, W, 2, C_CYAN, C_MAG);
 }
@@ -1183,9 +1195,13 @@ static void w_watchface(const lcd_frame_t *f) {
     char b[24];
     if (st->batt_pct >= 0) {   // the battery: percent and a small cell, centered at the top (inside the corner curve)
         int pct = st->batt_pct > 100 ? 100 : st->batt_pct;
-        uint16_t c = pct > 40 ? C_DIM : pct > 15 ? C_AMBER : C_RED;
+        bool usb = st->charge != LCD_CHARGE_NONE, on = st->charge == LCD_CHARGE_ON;
+        uint16_t c = on ? C_GREEN : pct > 40 ? C_DIM : pct > 15 ? C_AMBER : C_RED;
         snprintf(b, sizeof(b), "%d%%", pct);
-        int tw = text_w(&wfont_label, b, 0), x0 = (W - (tw + 10 + 30)) / 2;
+        int bw = usb ? 20 : 0;   // a bolt before the percent while on USB power: green charging, dim when not
+        int tw = text_w(&wfont_label, b, 0), x0 = (W - (bw + tw + 10 + 30)) / 2;
+        if (usb) w_bolt(x0 + 5, 54, 16, 2, on ? C_GREEN : C_DIM);
+        x0 += bw;
         text(&wfont_label, x0, 62, b, c);
         rrect_line(x0 + tw + 10, 46, 26, 16, 4, 2, c, 16);
         rrect(x0 + tw + 36, 50, 3, 8, 1, c, 16);
