@@ -2,7 +2,8 @@
 # deploy the web flasher (flasher/) with that build to GitHub Pages.
 # Run by hand (Actions -> Release -> Run workflow) to rebuild and redeploy the flasher from a branch without a release.
 #
-# One-time setup: Settings -> Pages -> Source: "GitHub Actions".
+# One-time setup: Settings -> Pages -> Source: "GitHub Actions"; and Settings -> Environments -> github-pages ->
+# Deployment branches and tags: add tag rule "v*" (by default only the default branch may deploy to Pages).
 # Tags: v<FW_VERSION>-watch.<n>, e.g. v1.7.6-watch.1 (checked against FW_VERSION in wardrive_bridge.c).
 name: Release
 
@@ -101,7 +102,13 @@ jobs:
           Don't update the watch from Wardrive Go or the rocketgod.dev flasher: they install the published ESP32-S3
           image, which doesn't drive the watch's screen.
           EOF
-          gh release create "${GITHUB_REF_NAME}" dist/* --title "${GITHUB_REF_NAME}" --verify-tag --notes-file notes.md
+          # A re-run of a tag's workflow finds its release already there: replace the files with this run's build, so
+          # the release and the Pages site always come from the same build.
+          if gh release view "${GITHUB_REF_NAME}" > /dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/* --title "${GITHUB_REF_NAME}" --verify-tag --notes-file notes.md
+          fi
 
       - uses: actions/configure-pages@v6
       - uses: actions/upload-pages-artifact@v5

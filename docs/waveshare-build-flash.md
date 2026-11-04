@@ -156,7 +156,16 @@ doesn't match `FW_VERSION` fails the run). It:
 4. deploys the web flasher (`flasher/index.html` with ESP Web Tools) and that build's image parts to GitHub Pages.
 
 Run it by hand (Actions → Release → Run workflow) to redeploy the flasher from a branch without making a release.
-One-time setup in the repository: Settings → Pages → Source: **GitHub Actions**.
+One-time setup in the repository:
+
+1. Settings → Pages → Source: **GitHub Actions**.
+2. Settings → Environments → `github-pages` → Deployment branches and tags → add a rule with **Ref type: Tag** and
+   pattern **`v*`** (the dialog defaults to Branch; a pattern without `*` matches one tag only). Without it GitHub refuses
+   the deploy from a tag ("not allowed to deploy to github-pages due to environment protection rules") while the build
+   and the release still succeed.
+
+Re-running a tag's workflow replaces that release's files with the re-run's build. A re-run uses the workflow file
+from the tagged commit, so a fix to the workflow needs a new tag.
 
 The flasher writes the bootloader, partition table, OTA data and app at their own offsets (`tools/package_flasher.py`
 reads them from `flash_args`). The release's merged image is one contiguous file from `0x0`, so it also overwrites
