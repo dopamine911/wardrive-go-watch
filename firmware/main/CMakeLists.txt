@@ -9,6 +9,9 @@ idf_component_register(
 # The watch's 410x502 pages and their fonts (lcd_draw.c) only go into ESP32-S3 images: no other chip runs that screen.
 if(IDF_TARGET STREQUAL "esp32s3")
     target_compile_definitions(${COMPONENT_LIB} PRIVATE LCD_WATCH=1)
+    # Painting is CPU-bound (docs/memory-soak-results.md, rendering): at -O2 the watch's alert frames paint in 117 ms
+    # instead of 162 (-Og, the project default). Pure C with no IDF calls; its renders are byte-identical at both levels.
+    set_source_files_properties(lcd_draw.c PROPERTIES COMPILE_OPTIONS "-O2")
 endif()
 # Bench diagnostics: per-function stack frames (.su files next to the objects) for the stack audit.
 if(CONFIG_WARDRIVEESP_MEMDIAG)
