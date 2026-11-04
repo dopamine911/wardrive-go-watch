@@ -20,12 +20,15 @@ typedef struct {
     int      batt_pct;       // -1 = no gauge
     uint32_t aps_live;       // APs heard in the last 20-30 s
     uint32_t aps_session;    // unique APs since boot
+    uint32_t aps_run;        // unique APs this run: since the board last linked to a host or lost it
     bool     ota;            // a firmware update is coming in: its screen replaces everything else
     bool     ota_installing; // every byte arrived: the board checks the image, installs it and restarts
     uint8_t  ota_pct;        // 0-100 received
     uint32_t ota_kb, ota_total_kb;
     bool     sd_log;         // no host linked and a run is going to the microSD card
+    bool     sd_wait_gps;    // no host linked, a card in, no run because the GPS has no fix yet
     uint32_t sd_rows;        // rows in that run so far
+    uint32_t sd_waiting;     // closed runs on the card waiting for an app to take them
     bool     sd_send;        // the app is taking offline runs off the card: their transfer screen replaces the dashboard
     bool     sd_sent;        // it deleted the last one: SENT for a moment, then back to the dashboard
     uint8_t  sd_run, sd_runs;// run sd_run of sd_runs this time (SENT: sd_runs = runs taken)
@@ -38,7 +41,6 @@ typedef struct {
     // The watch (410x502): counts it measures itself, its link and its recent sightings, for the mode it is in
     bool     scanning;       // the scan for `mode` is running
     bool     can_scan;       // a host is listening (the phone subscribed, or a USB session), so a scan can start
-    uint32_t aps_link;       // unique APs since this host linked (0 = none linked)
     int      batt_mv;        // 0 = unknown
     char     ble_name[24];   // the board's advertised name
     uint16_t mtu;            // the phone link's ATT MTU (0 = no phone)

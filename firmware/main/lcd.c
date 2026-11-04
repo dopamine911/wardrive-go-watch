@@ -1,6 +1,6 @@
 // WardriveESP — color status screens: the Koko Marauder V8's 240x320 ILI9341 and the Marauder Mini v3's 128x128 ST7735
 // over SPI, and the Waveshare ESP32-S3 Touch AMOLED 2.06's 410x502 CO5300 over QSPI. Boot splash, live dashboard,
-// alerts (scenes in lcd_draw.c); on the watch, three touch pages. Drawn in 16-row strips into one small DMA buffer; a
+// alerts (scenes in lcd_draw.c); on the watch, four touch pages. Drawn in 8-row strips into one small DMA buffer; a
 // strip goes to the panel only when its pixels changed.
 // SPDX-License-Identifier: MIT
 
@@ -47,10 +47,8 @@ static const char *TAG = "WardriveESP";
 #define SH LCD_SH
 #define FRAME_MS     200
 #define ALERT_BLINK_MS 250
-#define IDLE_DIM_MS  30000  // nobody linked this long: dim the backlight
-#define BL_ON   255
-#define BL_DIM  40
-#define BL_LEVEL(pct) ((pct) * 255 / 100)
+#define BL_ON   255   // always full: an offline board is still working, and the screen is how you tell
+#define BL_LEVEL(pct) ((pct) * BL_ON / 100)   // the watch's brightness setting (every other screen stays at 100 %)
 // Touch screens (the watch): its loop and its drawing pace.
 #define TOUCH_POLL_MS 20                   // touch polling while the panel is lit (and between strips of a frame)
 #define DARK_POLL_MS  50                   // while it is dark: the wake touch and the BOOT button
@@ -484,6 +482,7 @@ static void gather(lcd_frame_t *f, uint32_t now) {
     f->t0 = s_t0;
     f->live = f->st.aps_live;
     f->session = f->st.aps_session;
+    f->run = f->st.aps_run;
     uint32_t then = s_session_at[(now / 1000 + 1) % 10];   // the oldest of the ten samples
     f->fresh = f->session > then ? f->session - then : 0;
     f->cur = lcd_act_index(f->st.channel);
@@ -642,7 +641,7 @@ static void lcd_task(void *arg) {
     (void)arg;
     bool dark = false;
     int bl = -1;
-    uint32_t last_decay = now_ms(), last_linked = now_ms(), last_active = now_ms(), last_render = 0;
+    uint32_t last_decay = now_ms(), last_active = now_ms(), last_render = 0;
     uint32_t diag_at = now_ms(), frames = 0, strips = 0;
     int64_t draw_us = 0, worst_us = 0, gather_us = 0;
     lcd_frame_t *f = &s_frame;
@@ -687,7 +686,6 @@ static void lcd_task(void *arg) {
             int64_t t = esp_timer_get_time();
             gather(f, now);
             gather_us += esp_timer_get_time() - t;
-            if (f->st.ble || f->st.usb) last_linked = now;
             if (now - last_decay >= 1000) {   // activity fades; a new second's slot starts at zero
                 last_decay = now;
                 for (int i = 0; i < LCD_ACT_N; i++) s_act[i] = (uint8_t)(s_act[i] * 3 / 4);
@@ -699,8 +697,7 @@ static void lcd_task(void *arg) {
             if (us > worst_us) worst_us = us;
             frames++;
             last_render = now;
-            int on = BL_LEVEL(s_bright_pct);
-            int want = f->alerting || f->st.ota || now - last_linked <= IDLE_DIM_MS ? on : on < BL_DIM ? on : BL_DIM;
+            int want = BL_LEVEL(s_bright_pct);
             if (want != bl) { backlight(want); bl = want; }
         }
         if (s_touch && now - diag_at >= DIAG_MS && frames) {   // the watch: what drawing costs, for the bench log

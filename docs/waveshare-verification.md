@@ -141,3 +141,25 @@ for the mode) and the BOOT button to step the mode.
 | 43a | One press = one step | pass | HW-LOG, throwaway build logging every level change of GPIO 0 (then removed): two single presses, each exactly one low edge (13130→13280 ms and 33020→33190 ms, 150–170 ms) and one `watch: BOOT` ~30–50 ms in. No chatter seen on the pin. Two presses, so a bounce that shows once in 100 would be missed |
 | 44 | Four pages | pass | HW-EYE: swipes go clock → dashboard → networks → controls, dots centered |
 | 45 | Builds | pass | BUILD: esp32s3 0x14d9a0 (30 % free); esp32c3 and esp32c6 unchanged; esp32c5 (CSI line removed) +0x10; warnings identical to untouched upstream |
+
+## WardriveESP 1.7.6 (2026-11-03)
+
+Upstream 1.7.6 (`rocketgod.dev/WardriveESP/WardriveESP.zip`, `FW_VERSION "1.7.6"`) committed pristine on the 1.7.5
+vendor commit (branch `vendor/wardriveesp`, `d633973`) and merged into `main`. Upstream changed 11 files, PROTOCOL.md
+none. Two files conflicted, both resolved toward upstream's intent:
+
+- `lcd_draw.h`: upstream's 8-row strips (`LCD_SH 8`, half the DMA buffer) with the watch's 410×502 sizes.
+- `lcd.c`: upstream dropped the idle backlight dim ("an offline board is still working, and the screen is how you
+  tell"). The watch keeps its own brightness setting and screen-off timeout; it no longer dims after 30 s unlinked.
+
+The watch's own "this session" count (`aps_link`) was replaced by upstream's new per-run count (`aps_run`, `apc_run()`):
+the dashboard tile reads SENT while linked, SEEN otherwise, upstream's wording.
+
+| # | Check | Result | Evidence |
+|---|---|---|---|
+| 46 | Upstream screens exactly as upstream draws them | pass | AUTO: all 28 240×320 / 128×128 scenes from the merged tree byte-identical to pristine 1.7.6's own `tools/lcd_preview.c` |
+| 47 | Watch screens unchanged by 8-row strips | pass | AUTO: 13 watch scenes byte-identical before and after the merge; `w2`/`w7` differ only by the SENT/SEEN tile (viewed); `w9-alert` differs by at most 9/255 per channel in its full-screen gradient (built per strip from RGB565 endpoints, so its rounding follows strip height; not visible) |
+| 48 | All chips build | pass | BUILD: esp32s3 0x14e370 (30 % free); esp32c3 0x1150f0, esp32c6 0x165960, esp32c5 (CSI line removed) 0x197860; warnings identical to upstream |
+| 49 | Nothing of the watch leaks onto other chips | pass, with a known 48 bytes | BUILD: pristine 1.7.6 esp32c3 0x115080, esp32c6 0x1658f0; ours +0x70 on both. `nm` symbol diff (C3): only `BOARDS` (+16, the Waveshare entry in upstream's shared board table), `ext_build` (+16, the advert's screen flag names the watch) and `lcd_size` (+16, the 410x502 case), all from slice 1. On 1.7.5 the same additions fell inside alignment padding, so "C3 unchanged" (#21) was luck, not proof |
+| 50 | 1.7.6 on the watch | pass | HW-LOG: `WD:BOOT fw=1.7.6`, `board: Waveshare AMOLED 2.06`, `clock set from rtc`, `touch FT3x68: ready`, `WardriveESP 1.7.6 ready`; phone linked and streamed; BOOT → `bt on` → `bluetooth scan started`, → `cap on` → `capture started`; pages 0–3. HW-EYE: clock right, BOOT stepped the mode, SENT tile while linked; Wardrive Go shows 1.7.6 |
+| 51 | Frame cost with 8-row strips | pass | HW-LOG: `lcd: 68 frames in 60 s, avg 122 ms (paint 116, panel 11, touch 3, state 3), worst 576 ms, … stack left 1108`, capture running. One sample; not slower than 16-row strips (#37: avg 164 ms while capturing) |

@@ -18,6 +18,7 @@ void sdrun_init_bus(const char *board_id, const char *board_name, const char *fw
     (void)board_id; (void)board_name; (void)fw; (void)sck; (void)miso; (void)mosi; (void)cs;
 }
 bool sdrun_remount(void) { return false; }
+bool sdrun_format(void) { return false; }
 bool sdrun_mounted(void) { return false; }
 void sdrun_space(uint32_t *total_mb, uint32_t *free_mb) { *total_mb = 0; *free_mb = 0; }
 bool sdrun_start(void) { return false; }
@@ -73,14 +74,17 @@ static const char *TAG = "WardriveESP";
 
 static const char *s_board_id = "", *s_board_name = "", *s_fw = "";
 static sdmmc_card_t *s_card;
+static volatile bool s_format;   // `sd format yes`: the next mount formats a card it can't read
 static volatile bool s_mounted, s_mounting;
 static int s_cs = -1;
 static int s_own_sck = -1, s_own_miso = -1, s_own_mosi = -1, s_own_cs = -1;   // sdrun_init_bus: the slot's own bus
 static bool s_own_bus_up;
 static volatile uint32_t s_total_mb, s_free_mb;
 static TaskHandle_t s_task;
+// The row queue and buffer exist only while a run is open (or about to be): a board linked to a phone needs neither,
+// and a Koko V8 with its screen, gauge, GPS and a card ran out of heap with them held (field 2026-11-03).
 static QueueHandle_t s_q;
-static char *s_buf;          // BUF_SZ, allocated once a card is mounted
+static char *s_buf;          // BUF_SZ
 static size_t s_n;
 static volatile int s_fd = -1;
 static volatile bool s_want;      // a run should be open (set by sdrun_start, cleared by sdrun_stop)
@@ -153,7 +157,7 @@ static bool mount(void) {
     sdspi_device_config_t d = SDSPI_DEVICE_CONFIG_DEFAULT();
     d.host_id = (spi_host_device_t)host;
     d.gpio_cs = (gpio_num_t)cs;
-    esp_vfs_fat_sdmmc_mount_config_t mc = { .format_if_mount_failed = false, .max_files = 2,   // the run + one reader
+    esp_vfs_fat_sdmmc_mount_config_t mc = { .format_if_mount_failed = s_format, .max_files = 2,   // the run + one reader
                                             .allocation_unit_size = 16 * 1024 };
     esp_err_t e = ESP_FAIL;
     // A card left mid-transfer by a reset (its power never dropped) can garble its first answers: try a few times.
@@ -168,18 +172,10 @@ static bool mount(void) {
         lcd_bus_unlock();
         if (e == ESP_ERR_TIMEOUT) break;   // nothing answers: no card, no point retrying
     }
+    if (s_format) ESP_LOGW(TAG, "sd: format asked: %s", e == ESP_OK ? "card ready" : esp_err_to_name(e));
+    s_format = false;
     if (e != ESP_OK) {
         ESP_LOGI(TAG, "sd: no card mounted (%s)", esp_err_to_name(e));
-        return false;
-    }
-    if (!s_q) s_q = xQueueCreate(Q_LEN, sizeof(sdrun_ap_t));
-    if (!s_buf) s_buf = heap_caps_malloc(BUF_SZ, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (!s_q || !s_buf) {
-        ESP_LOGW(TAG, "sd: no memory for the writer");
-        lcd_bus_lock();
-        esp_vfs_fat_sdcard_unmount(MOUNT, s_card);
-        lcd_bus_unlock();
-        s_card = NULL;
         return false;
     }
     lcd_bus_lock();
@@ -376,17 +372,36 @@ static void writer_task(void *arg) {
         return;
     }
     s_mounting = false;
+    uint32_t idle_since = 0;
     for (;;) {
         if (!s_mounted && s_mount_req) { s_mount_req = false; (void)mount(); }   // `sd mount` after a lost card
-        if (s_want && s_fd < 0) {   // a new run, before its file opens: its rows wait in the queue
+        if (s_want && !s_buf) s_buf = heap_caps_malloc(BUF_SZ, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);   // a start that
+        if (s_want && !s_q) s_q = xQueueCreate(Q_LEN, sizeof(sdrun_ap_t));                             // raced a release
+        if (s_want && s_fd < 0 && s_buf && s_q) {   // a new run, before its file opens: its rows wait in the queue
             if (s_mounted && now_ms() - s_start_ms >= OPEN_MS) open_run();
             else { vTaskDelay(pdMS_TO_TICKS(100)); continue; }
+        }
+        if (!s_q || !s_buf) {   // no run (or no memory for one yet): nothing to take
+            vTaskDelay(pdMS_TO_TICKS(250));
+            continue;
         }
         sdrun_ap_t r;
         bool got = xQueueReceive(s_q, &r, pdMS_TO_TICKS(250)) == pdTRUE;
         if (got && s_fd >= 0) append(&r);
         else if (got && s_want) s_dropped++;
         if (!s_want && s_fd >= 0 && !uxQueueMessagesWaiting(s_q)) close_run();
+        if (s_want || s_fd >= 0 || s_active) idle_since = 0;
+        else if (!idle_since) idle_since = now_ms() | 1;
+        if (idle_since && now_ms() - idle_since >= 1000) {   // no run for a second: a late row has landed by now
+            QueueHandle_t q = s_q;
+            s_q = NULL;
+            vQueueDelete(q);
+            free(s_buf);
+            s_buf = NULL;
+            s_n = 0;
+            idle_since = 0;
+            continue;
+        }
         uint32_t now = now_ms();
         if (s_fd >= 0 && s_n && now - s_last_flush >= FLUSH_MS && !flush()) { close_run(); s_active = s_want = false; }
         if (s_fd >= 0 && now - s_last_log >= LOG_MS) {
@@ -424,11 +439,35 @@ bool sdrun_remount(void) {
     if (s_task && !s_mounted && !s_mounting) { s_mount_req = true; return true; }
     return spawn();
 }
+bool sdrun_format(void) {
+    if (s_mounted) {   // a card in use: formatted in place, unless a run is being written to it
+        if (s_active || s_want || s_fd >= 0) return false;
+        lcd_bus_lock();
+        esp_err_t e = esp_vfs_fat_sdcard_format(MOUNT, s_card);
+        if (e == ESP_OK) mkdir(RUNS, 0777);
+        lcd_bus_unlock();
+        ESP_LOGW(TAG, "sd: format of a mounted card: %s", esp_err_to_name(e));
+        if (e != ESP_OK) return false;
+        refresh_space();
+        recount();
+        return true;
+    }
+    s_format = true;
+    if (sdrun_remount()) return true;
+    s_format = false;
+    return false;
+}
 bool sdrun_mounted(void) { return s_mounted; }
 void sdrun_space(uint32_t *total_mb, uint32_t *free_mb) { *total_mb = s_total_mb; *free_mb = s_free_mb; }
 
 bool sdrun_start(void) {
     if (!s_mounted) return false;
+    if (!s_buf) s_buf = heap_caps_malloc(BUF_SZ, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!s_q) s_q = xQueueCreate(Q_LEN, sizeof(sdrun_ap_t));
+    if (!s_buf || !s_q) {
+        ESP_LOGW(TAG, "sd: no memory for a run");
+        return false;
+    }
     if (!s_want && s_fd < 0) { s_rows = 0; s_dropped = 0; s_start_ms = now_ms(); }   // a run still closing carries on
     s_want = true;
     s_active = true;

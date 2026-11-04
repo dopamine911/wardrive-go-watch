@@ -30,6 +30,9 @@ void sdrun_init(const char *board_id, const char *board_name, const char *fw);
 void sdrun_init_bus(const char *board_id, const char *board_name, const char *fw, int sck, int miso, int mosi, int cs);
 /// Try the mount again (`sd mount`), e.g. after a card went in. False when the board has no slot or one is mounted.
 bool sdrun_remount(void);
+/// Erase the card and format it FAT (`sd format yes`): a mounted card at once (false while a run is being written to
+/// it), a card the board can't read on the next mount. False when the board has no slot.
+bool sdrun_format(void);
 bool sdrun_mounted(void);
 /// Card size and free space in MB (free is refreshed at mount and whenever a run closes).
 void sdrun_space(uint32_t *total_mb, uint32_t *free_mb);

@@ -1,7 +1,7 @@
 // WardriveESP — the color screens' scenes: boot splash (radar sweep), live dashboard, alert banner, firmware update,
 // offline runs going to the phone, each in a 240x320 and a compact 128x128 layout; and on watch builds (LCD_WATCH) the
 // watch's own 410x502 pages. Anti-aliased text from lcd_fonts.h (lcd_fonts_watch.h for the watch); everything is drawn
-// per 16-row strip, clipped, straight into the wire buffer.
+// per 8-row strip, clipped, straight into the wire buffer.
 // SPDX-License-Identifier: MIT
 
 #include <stdio.h>
@@ -178,6 +178,7 @@ enum { SOLID, VERT, HORIZ };
 // Text with its baseline at `base`. VERT shades c1 (cap top) → c2 (baseline), HORIZ c1 (left) → c2 (right end).
 static void text_ex(const lcd_font_t *f, int x, int base, const char *s, int sp, uint16_t c1, uint16_t c2, int mode, int a) {
     int top = base - f->ascent, span = text_w(f, s, sp), x0 = x, cap = f->ascent * 3 / 4;
+    int bold = f == &font_small;   // its 1 px strokes were hard to read on the panels: each pixel also lands 1 px right
     if (top + f->height <= s_y0 || top >= s_y0 + SH) return;
     for (; *s; s++) {
         const lcd_glyph_t *g = glyph_of(f, *s);
@@ -194,6 +195,7 @@ static void text_ex(const lcd_font_t *f, int x, int base, const char *s, int sp,
                     if (!v) continue;
                     if (mode == HORIZ) c = mix(c1, c2, gx + col - x0, span);
                     blend(gx + col, gy + row, c, (v * a + 7) / 15);
+                    if (bold) blend(gx + col + 1, gy + row, c, (v * a + 7) / 15);
                 }
             }
         }
@@ -251,13 +253,6 @@ static void header(const lcd_frame_t *f) {
     }
 }
 
-/// Rows on the card, short: 9999, 38.4K, 1.2M.
-static void rows_short(char *b, size_t n, unsigned long rows) {
-    if (rows < 10000) snprintf(b, n, "%lu", rows);
-    else if (rows < 1000000) snprintf(b, n, "%lu.%luK", rows / 1000, (rows / 100) % 10);
-    else snprintf(b, n, "%lu.%luM", rows / 1000000, (rows / 100000) % 10);
-}
-
 static void status_pill(const lcd_frame_t *f) {
     const lcd_status_t *st = &f->st;
     bool sd = !st->usb && !st->ble && st->sd_log;   // offline run going to the microSD card
@@ -271,12 +266,12 @@ static void status_pill(const lcd_frame_t *f) {
     circle(25, 64, 5, 0, c, linked ? 16 : 8 + pulse);
     uint32_t up = (f->now - f->t0) / 1000;
     char b[12];
-    if (sd) rows_short(b, sizeof(b), st->sd_rows);   // in the clock's place while saving: rows on the card so far
-    else if (up < 3600) snprintf(b, sizeof(b), "%lu:%02lu", (unsigned long)(up / 60), (unsigned long)(up % 60));
+    if (up < 3600) snprintf(b, sizeof(b), "%lu:%02lu", (unsigned long)(up / 60), (unsigned long)(up % 60));
     else snprintf(b, sizeof(b), "%luh%02lu", (unsigned long)(up / 3600), (unsigned long)((up / 60) % 60));
     int clock_x = 222 - text_w(&font_small, b, 0);
-    text(&font_small, clock_x, 69, b, sd ? C_WHITE : C_DIM);
-    const char *what = st->usb ? "USB" : st->ble ? "BLUETOOTH" : sd ? "SAVING TO SD" : "NO PHONE";
+    text(&font_small, clock_x, 69, b, C_DIM);
+    const char *what = st->usb ? "USB" : st->ble ? "BLUETOOTH" : sd ? "SAVING TO SD" :
+                       st->sd_wait_gps ? "NO GPS FIX" : "NOT SAVING";   // no phone and no card: nothing is kept
     text_ex(&font_mid, 38, 71, what, 1, c, c, SOLID, 16);
     if (linked && st->holder[0]) {
         char h[sizeof(st->holder)];
@@ -296,27 +291,58 @@ static void status_pill(const lcd_frame_t *f) {
     }
 }
 
+/// Saving an offline run to the card: the board itself is collecting (linked, the phone is).
+static bool collecting(const lcd_status_t *st) { return !st->usb && !st->ble && st->sd_log; }
+
+// Two counts side by side at one size: APs in range now, and this run's unique APs (SENT to the phone, SAVED to the
+// card, or only SEEN). Both step down a font together when either gets long.
+/// A count that stays big: exact to 99999, then 100K-9999K, then 10M up. The count fonts hold digits only, so the
+/// K / M is drawn after in the title font.
+static const char *count_short(char *b, size_t n, unsigned long v) {
+    if (v < 100000) { snprintf(b, n, "%lu", v); return ""; }
+    if (v < 10000000) { snprintf(b, n, "%lu", v / 1000); return "K"; }
+    snprintf(b, n, "%lu", v / 1000000);
+    return "M";
+}
+
+static int count_w(const lcd_font_t *nf, const char *b, const char *unit) {
+    return text_w(nf, b, 1) + (*unit ? 2 + text_w(&font_title, unit, 0) : 0);
+}
+
+static void ap_count(const lcd_font_t *nf, int x, int base, const char *b, const char *unit) {
+    glow(nf, x, base, b, C_TEAL, 3);
+    text_ex(nf, x, base, b, 1, C_WHITE, C_CYAN, VERT, 16);
+    if (*unit) text(&font_title, x + text_w(nf, b, 1) + 2, base, unit, C_CYAN);
+}
+
 static void ap_block(const lcd_frame_t *f) {
+    bool col = collecting(&f->st);
+    const int cw = 106, rx = 126;   // column width, right column x
     fill(10, 87, 3, 11, C_CYAN);
     text_ex(&font_small, 18, 97, "IN RANGE", 1, C_DIM, C_DIM, SOLID, 16);
-    char b[24];
-    snprintf(b, sizeof(b), "%lu TOTAL", (unsigned long)f->session);
-    int tx = 230 - text_w(&font_small, b, 0);
-    text(&font_small, tx, 97, b, C_DIM);
-    if (f->fresh) {
-        snprintf(b, sizeof(b), "+%lu", (unsigned long)f->fresh);
-        int pw = text_w(&font_title, b, 1) + 12;
-        if (tx - 6 - pw > 18 + text_w(&font_small, "IN RANGE", 1) + 4) {   // only when it fits between the two
-            rrect(tx - 6 - pw, 85, pw, 16, 8, C_GREEN, 4);
-            rrect_line(tx - 6 - pw, 85, pw, 16, 8, 1, C_GREEN, 14);
-            text_ex(&font_title, tx - 6 - pw + 6, 98, b, 1, C_GREEN, C_GREEN, SOLID, 16);
+    fill(rx - 8, 87, 3, 11, col ? C_MAG : C_TEAL);
+    bool linked = f->st.usb || f->st.ble;
+    const char *rl = linked ? "SENT" : col ? "SAVED" : "SEEN";
+    text_ex(&font_small, rx, 97, rl, 1, C_DIM, C_DIM, SOLID, 16);
+    if (f->fresh) {   // new in the last 10 s, after the right label
+        char p[12];
+        snprintf(p, sizeof(p), "+%lu", (unsigned long)f->fresh);
+        int px = rx + text_w(&font_small, rl, 1) + 6, pw = text_w(&font_small, p, 0) + 10;
+        if (px + pw <= W - 4) {
+            rrect(px, 85, pw, 15, 7, C_GREEN, 4);
+            rrect_line(px, 85, pw, 15, 7, 1, C_GREEN, 14);
+            text(&font_small, px + 5, 97, p, C_GREEN);
         }
     }
-    snprintf(b, sizeof(b), "%lu", (unsigned long)f->live);
-    const lcd_font_t *nf = text_w(&font_huge, b, 2) <= W - 20 ? &font_huge : &font_big;
-    int base = nf == &font_huge ? 158 : 152;
-    glow(nf, 10, base, b, C_TEAL, 3);
-    text_ex(nf, 10, base, b, 2, C_WHITE, C_CYAN, VERT, 16);
+    char a[16], b[16];
+    const char *ua = count_short(a, sizeof(a), f->live), *ub = count_short(b, sizeof(b), f->run);
+    static const lcd_font_t *const FS[] = { &font_huge, &font_big, &font_num, &font_head };
+    static const int BASE[] = { 158, 150, 144, 140 };
+    int k = 0;
+    while (k < 3 && (count_w(FS[k], a, ua) > cw || count_w(FS[k], b, ub) > cw)) k++;
+    fill_a(rx - 10, 106, 1, 52, C_EDGE, 10);
+    ap_count(FS[k], 10, BASE[k], a, ua);
+    ap_count(FS[k], rx - 2, BASE[k], b, ub);
 }
 
 static void tile(int x, int y, const char *label, const char *value, const char *unit, uint16_t accent) {
@@ -362,7 +388,13 @@ static void spectrum(const lcd_frame_t *f) {
     }
     text(&font_small, 8, 314, "2.4 GHz", C_DIM);
     text(&font_small, 96, 314, "5 GHz", C_DIM);
-    text_r(&font_small, 234, 314, f->version, C_FAINT);
+    if (f->st.sd_waiting) {   // runs on the card for the app to take, in the version's place
+        char b[24];
+        snprintf(b, sizeof(b), "%lu RUN%s ON SD", (unsigned long)f->st.sd_waiting, f->st.sd_waiting == 1 ? "" : "S");
+        text_r(&font_small, 234, 314, b, C_MAG);
+    } else {
+        text_r(&font_small, 234, 314, f->version, C_FAINT);
+    }
 }
 
 static void dashboard(const lcd_frame_t *f) {
@@ -502,41 +534,56 @@ static void mini_dashboard(const lcd_frame_t *f) {
     char b[24];
     background();
     vgrad(0, 0, W, 19, C_HEAD0, C_HEAD1);
+    uint16_t lc = link_color(st);   // who holds the board: green USB, cyan Bluetooth, magenta saving to SD, amber nobody
+    bool linked = st->usb || st->ble, col = collecting(st);
     text_ex(&font_title, 4, 15, "WARDRIVE", 0, C_CYAN, C_MAG, HORIZ, 16);
     hgrad(0, 19, W, 1, C_CYAN, C_MAG);
-    uint16_t lc = link_color(st);   // who holds the board: green USB, cyan Bluetooth, magenta saving to SD, amber nobody
-    bool linked = st->usb || st->ble;
     int pulse = linked ? 16 : (int)((f->now / 90) % 16);
     if (!linked && pulse > 8) pulse = 16 - pulse;
     circle(118, 9, 6, 0, lc, linked ? 4 : pulse / 2);
     circle(118, 9, 3, 0, lc, linked ? 16 : 8 + pulse);
 
-    text(&font_small, 4, 32, "IN RANGE", C_DIM);
-    if (f->fresh) snprintf(b, sizeof(b), "+%lu NEW", (unsigned long)f->fresh);
-    else snprintf(b, sizeof(b), "%lu TOTAL", (unsigned long)f->session);
-    if (text_w(&font_small, b, 0) > 124 - 64) snprintf(b, sizeof(b), "%lu", (unsigned long)(f->fresh ? f->fresh : f->session));
-    text_r(&font_small, 124, 32, b, f->fresh ? C_GREEN : C_DIM);
-    snprintf(b, sizeof(b), "%lu", (unsigned long)f->live);
-    const lcd_font_t *nf = text_w(&font_big, b, 1) <= W - 8 ? &font_big : text_w(&font_num, b, 1) <= W - 8 ? &font_num : &font_head;
-    int base = nf == &font_big ? 70 : nf == &font_num ? 66 : 62;
-    glow(nf, 4, base, b, C_TEAL, 3);
-    text_ex(nf, 4, base, b, 1, C_WHITE, C_CYAN, VERT, 16);
+    // What the board is doing, in a pill like the big screens' (in the link's color).
+    const char *state = st->usb ? "USB" : st->ble ? "BLUETOOTH" : col ? "SAVING TO SD" :
+                        st->sd_wait_gps ? "NO GPS FIX" : "NOT SAVING";
+    rrect(3, 23, W - 6, 15, 7, lc, 3);
+    rrect_line(3, 23, W - 6, 15, 7, 1, lc, 11);
+    text_ex(&font_small, (W - text_w(&font_small, state, 1)) / 2, 35, state, 1, lc, lc, SOLID, 16);
 
+    // The line above names the big number (what this run saved while saving to the card, APs in range otherwise) and
+    // puts the other count beside it.
+    char o[12];
+    const char *ou = count_short(o, sizeof(o), col ? f->live : f->run);
+    const char *big_label = col ? "SAVED" : "IN RANGE";
+    text(&font_small, 4, 52, big_label, col ? C_MAG : C_DIM);
+    if (linked || col) {
+        snprintf(b, sizeof(b), "%s%s %s", o, ou, col ? "NEAR" : "SENT");
+        if (text_w(&font_small, b, 0) > 124 - 4 - text_w(&font_small, big_label, 0) - 6) snprintf(b, sizeof(b), "%s%s", o, ou);
+        text_r(&font_small, 124, 52, b, C_DIM);
+    }
+    const char *bu = count_short(b, sizeof(b), col ? f->run : f->live);
+    const lcd_font_t *nf = count_w(&font_big, b, bu) <= W - 8 ? &font_big : count_w(&font_num, b, bu) <= W - 8 ? &font_num : &font_head;
+    int base = nf == &font_big ? 88 : nf == &font_num ? 84 : 80;
+    ap_count(nf, 4, base, b, bu);
+
+    // Bottom line: the mode and its channel ("WIFI CH 36"), captures or Bluetooth devices at the right. Whether the
+    // right side fits is judged on the widest channel, so it never comes and goes as the channel changes.
     uint16_t mc = !strcmp(st->mode, "BT") ? C_BLUE : !strcmp(st->mode, "CAP") ? C_MAG : !strcmp(st->mode, "CSI") ? C_AMBER : C_CYAN;
     const char *mode = st->mode[0] ? st->mode : "--";
-    text_ex(&font_mid, 4, 93, mode, 1, mc, mc, SOLID, 16);
-    int used = 4 + text_w(&font_mid, mode, 1);
-    if (st->channel) {
+    text_ex(&font_mid, 4, 103, mode, 1, mc, mc, SOLID, 16);
+    int used = 4 + text_w(&font_mid, mode, 1), worst = used;
+    if (st->channel && strcmp(st->mode, "BT")) {
+        text(&font_small, used + 5, 102, "CH", C_DIM);
+        used += 5 + text_w(&font_small, "CH", 0);
         snprintf(b, sizeof(b), "%u", st->channel);
-        text(&font_mid, used + 6, 93, b, C_WHITE);
-        used += 6 + text_w(&font_mid, b, 0);
+        text(&font_mid, used + 4, 103, b, C_WHITE);
+        worst = used + 4 + text_w(&font_mid, "177", 0);
     }
     uint16_t rc = C_MAG;
     b[0] = 0;
     if (st->captures) snprintf(b, sizeof(b), "%lu CAP", (unsigned long)st->captures);
-    else if (!strcmp(st->mode, "BT")) { snprintf(b, sizeof(b), "%lu BT", (unsigned long)st->bt_devices); rc = C_BLUE; }
-    else if (!linked && st->sd_log) { char r[12]; rows_short(r, sizeof(r), st->sd_rows); snprintf(b, sizeof(b), "SD %s", r); }
-    if (b[0] && 124 - text_w(&font_small, b, 0) > used + 6) text_r(&font_small, 124, 92, b, rc);   // only when it fits
+    else if (!strcmp(st->mode, "BT")) { snprintf(b, sizeof(b), "%lu DEV", (unsigned long)st->bt_devices); rc = C_BLUE; }
+    if (b[0] && 124 - text_w(&font_small, b, 0) > worst + 6) text_r(&font_small, 124, 102, b, rc);
 
     const int sb = 125, top = 21;
     fill(2, sb + 1, W - 4, 1, C_EDGE);
@@ -774,7 +821,9 @@ static void packet_stream(const lcd_frame_t *f, int x0, int x1, int cy, int bs, 
     seg(x1 + 2 - h, cy + h, x1 + 2, cy, 0, go ? C_MAG : C_FAINT, 16);
     x1 -= h + 2;
     if (!go) return;
-    int step = bs * 5 + 6, off = (int)((f->now / 8) % (uint32_t)step), fade = bs * 2;
+    // ~30 px/s: the panel redraws every ~200-300 ms, and packets moving more than half a step per frame read as running
+    // backward (phone to card), as they did at 125 px/s (owner 2026-11-03).
+    int step = bs * 5 + 6, off = (int)((f->now / 32) % (uint32_t)step), fade = bs * 2;
     for (int x = x0 - step + off; x < x1; x += step)
         for (int k = 0; k < 3; k++) {
             int xx = x + k * (bs + 2);
@@ -1223,9 +1272,9 @@ static void w_dashboard(const lcd_frame_t *f) {
     } else {
         snprintf(b, sizeof(b), "%lu", (unsigned long)f->session);
         w_tile(x1, y1, "SINCE BOOT", b, NULL, C_CYAN, C_WHITE);
-        if (st->usb || st->ble) snprintf(b, sizeof(b), "%lu", (unsigned long)st->aps_link);
-        else snprintf(b, sizeof(b), "--");
-        w_tile(x2, y1, "THIS SESSION", b, NULL, C_GREEN, C_WHITE);
+        bool linked = st->usb || st->ble;   // this run: APs new since the board linked (sent), or since it lost the link
+        snprintf(b, sizeof(b), "%lu", (unsigned long)f->run);
+        w_tile(x2, y1, linked ? "SENT" : "SEEN", b, NULL, C_GREEN, C_WHITE);
         if (st->channel) snprintf(b, sizeof(b), "%u", st->channel);
         else snprintf(b, sizeof(b), "--");
         w_tile(x1, y2, "CHANNEL", b, st->channel ? "2.4 GHz" : NULL, C_YEL, C_WHITE);

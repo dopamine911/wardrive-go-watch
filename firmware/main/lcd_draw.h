@@ -1,4 +1,4 @@
-// WardriveESP — what the color screens (240x320, 128x128, the watch's 410x502) draw, one 16-row strip at a time. Plain C
+// WardriveESP — what the color screens (240x320, 128x128, the watch's 410x502) draw, one 8-row strip at a time. Plain C
 // with no ESP-IDF calls, so the same code renders the panel and the bench preview (tools: lcd_preview.c).
 // SPDX-License-Identifier: MIT
 #pragma once
@@ -9,8 +9,8 @@
 
 #define LCD_W  410                      // the largest panel (the watch): strip buffers and hashes are sized for it
 #define LCD_H  502
-#define LCD_SH 16                       // rows per strip
-#define LCD_STRIPS ((LCD_H + LCD_SH - 1) / LCD_SH)   // the last strip of a panel may be partial (502 = 31 x 16 + 6)
+#define LCD_SH 8                        // rows per strip (8: half the DMA strip buffer, 3.8 KB back on a 240-wide panel)
+#define LCD_STRIPS ((LCD_H + LCD_SH - 1) / LCD_SH)   // the last strip of a panel may be partial (502 = 62 x 8 + 6)
 
 // The watch: four pages, swiped left and right (the first is a plain clock). Buttons on the controls page act on a hold
 // (gesture.h).
@@ -25,6 +25,7 @@ typedef struct {
     lcd_status_t st;
     uint32_t now, t0;                   // ms
     uint32_t live, session, fresh;      // APs in range now, unique this session, new in the last 10 s
+    uint32_t run;                       // unique this run (sent to the phone, or saved to the card)
     int cur;                            // activity index of the channel being scanned (-1 = none)
     uint8_t act[LCD_ACT_N];             // channel activity, 0-250
     bool alerting, alert_on;            // banner showing, and its blink phase

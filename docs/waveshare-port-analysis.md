@@ -3,6 +3,9 @@
 Status: investigation only. No firmware modified.
 Date: 2026-11-03.
 
+Written against WardriveESP 1.7.5. The firmware has since moved to 1.7.6 (verification "WardriveESP 1.7.6"): line
+numbers and the strip height below describe 1.7.5.
+
 ## 0. Findings that change the plan
 
 Ordered by impact. Confidence in brackets.

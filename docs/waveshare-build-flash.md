@@ -21,7 +21,7 @@ idf.py -B build-esp32s3 -D SDKCONFIG=build-esp32s3/sdkconfig build
 ```
 
 Expected:
-- `wardrive_bridge.bin binary size 0x14d9a0 bytes … (30%) free`.
+- `wardrive_bridge.bin binary size 0x14e370 bytes … (30%) free`.
 - The same three `-Wunused-function` warnings the untouched upstream source has: `display.c text_c`,
   `wardrive_bridge.c led_apply`, `board_is_awok`.
 
